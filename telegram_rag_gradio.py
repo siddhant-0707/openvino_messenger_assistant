@@ -1,6 +1,7 @@
 import os
 import asyncio
 import gradio as gr
+import nest_asyncio
 from dotenv import load_dotenv
 from telegram_ingestion import TelegramChannelIngestion
 from telegram_rag_integration import TelegramRAGIntegration
@@ -8,52 +9,124 @@ from pathlib import Path
 import openvino as ov
 from openvino_tokenizers import convert_tokenizer
 from transformers import AutoTokenizer, AutoModel
-from ov_langchain_helper import OpenVINOLLM
+from ov_langchain_helper import OpenVINOLLM, OpenVINOBgeEmbeddings, OpenVINOReranker
+from langchain.retrievers import ContextualCompressionRetriever
 import json
 from datetime import datetime
 from article_processor import ArticleProcessor
+from llm_config import (
+    SUPPORTED_EMBEDDING_MODELS,
+    SUPPORTED_RERANK_MODELS,
+    SUPPORTED_LLM_MODELS,
+)
+
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
 
 # Load environment variables
 load_dotenv()
 
-def download_and_convert_model(model_name: str = "BAAI/bge-small-en-v1.5"):
-    """Download and convert the model to OpenVINO format"""
-    model_path = Path(model_name.split("/")[-1])
-    if not model_path.exists():
-        print(f"Downloading and converting model {model_name}...")
-        model_path.mkdir(exist_ok=True)
-        
-        # Download and convert tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        convert_tokenizer(tokenizer, model_path)
-        
-        # Download and convert model
-        model = AutoModel.from_pretrained(model_name)
-        ov_model = ov.convert_model(model)
-        ov.save_model(ov_model, model_path / "openvino_model.xml")
-        print(f"Model saved to {model_path}")
-    else:
-        print(f"Model already exists at {model_path}")
+# Setup directories
+telegram_data_dir = Path("telegram_data")
+telegram_data_dir.mkdir(exist_ok=True)
+
+vector_store_path = Path("telegram_vector_store")
+vector_store_path.mkdir(exist_ok=True)
+
+# Default model selections
+DEFAULT_LANGUAGE = "English"
+DEFAULT_LLM_MODEL = "qwen2.5-3b-instruct"
+DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
+DEFAULT_RERANK_MODEL = "bge-reranker-v2-m3"
+DEFAULT_DEVICE = "AUTO"
+
+# Get model configurations
+embedding_model_configuration = SUPPORTED_EMBEDDING_MODELS[DEFAULT_LANGUAGE][DEFAULT_EMBEDDING_MODEL]
+rerank_model_configuration = SUPPORTED_RERANK_MODELS[DEFAULT_RERANK_MODEL]
+llm_model_configuration = SUPPORTED_LLM_MODELS[DEFAULT_LANGUAGE][DEFAULT_LLM_MODEL]
+
+# Model paths
+embedding_model_dir = Path(DEFAULT_EMBEDDING_MODEL)
+rerank_model_dir = Path(DEFAULT_RERANK_MODEL)
+llm_base_dir = Path(DEFAULT_LLM_MODEL)
+llm_model_dir = llm_base_dir / "INT4_compressed_weights"
+
+# Initialize models
+embedding = None
+reranker = None
+llm = None
+
+def initialize_models(device="AUTO"):
+    """Initialize all models with the specified device"""
+    global embedding, reranker, llm
     
-    return str(model_path)
+    # Initialize embedding model
+    if embedding_model_dir.exists():
+        embedding = OpenVINOBgeEmbeddings(
+            model_path=str(embedding_model_dir),
+            model_kwargs={"device_name": device},
+            encode_kwargs={
+                "mean_pooling": embedding_model_configuration["mean_pooling"],
+                "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
+                "batch_size": 4,
+            }
+        )
+        print(f"Embedding model loaded from {embedding_model_dir}")
+    else:
+        print(f"Embedding model not found at {embedding_model_dir}")
+    
+    # Initialize reranker model
+    if rerank_model_dir.exists():
+        reranker = OpenVINOReranker(
+            model_path=str(rerank_model_dir),
+            model_kwargs={"device_name": device},
+            top_n=5,
+        )
+        print(f"Reranking model loaded from {rerank_model_dir}")
+    else:
+        print(f"Reranking model not found at {rerank_model_dir}")
+    
+    # Initialize LLM
+    if llm_model_dir.exists():
+        llm = OpenVINOLLM.from_model_path(
+            model_path=str(llm_model_dir),
+            device=device,
+        )
+        # Set model name for prompt template lookup
+        llm.model_name = DEFAULT_LLM_MODEL
+        
+        # Set default parameters
+        llm.config.max_new_tokens = 1024
+        llm.config.temperature = 0.7
+        llm.config.top_p = 0.9
+        llm.config.top_k = 50
+        llm.config.repetition_penalty = 1.1
+        llm.config.do_sample = True
+        print(f"LLM loaded from {llm_model_dir}")
+    else:
+        print(f"LLM not found at {llm_model_dir}")
 
-# Download and convert model
-model_path = download_and_convert_model()
+# Initialize RAG system
+def initialize_rag():
+    """Initialize the RAG system with the current models"""
+    global rag
+    if embedding is not None:
+        rag = TelegramRAGIntegration(
+            embedding_model=embedding,
+            vector_store_path=str(vector_store_path),
+            chunk_size=500,
+            chunk_overlap=50
+        )
+        print("RAG system initialized with embedding model")
+    else:
+        print("Cannot initialize RAG system: embedding model not loaded")
 
-# Initialize RAG system and article processor
-rag = TelegramRAGIntegration(
-    embedding_model_name=model_path,
-    vector_store_path="telegram_vector_store",
-    chunk_size=500,
-    chunk_overlap=50
-)
+# Initialize models with default device
+initialize_models(DEFAULT_DEVICE)
+initialize_rag()
+
+# Initialize article processor
 article_processor = ArticleProcessor()
-
-# Initialize LLM
-llm = OpenVINOLLM.from_model_path(
-    model_path="qwen2.5-3b-instruct/INT4_compressed_weights",
-    device="CPU"
-)
 
 def format_message(msg):
     """Format a message for display"""
@@ -73,22 +146,37 @@ Message: {msg['text'][:200]}...
         output += f"""
 Article Title: {article.get('title', 'N/A')}
 Article URL: {article.get('url', 'N/A')}
-Article Content: {article['text'][:200]}...
-{'...' if len(article['text']) > 200 else ''}
 """
+        
+        # Check if extraction failed
+        if article.get('extracted') is False:
+            output += f"Article Content: [Extraction failed - {article['text']}]\n"
+        else:
+            # Show content snippet for successfully extracted articles
+            content = article['text']
+            if len(content) > 200:
+                content = content[:200] + "..."
+            output += f"Article Content: {content}\n"
     
     return output
 
-async def download_messages(channels_str: str, limit: int, hours: int) -> tuple[str, str]:
-    """Download messages from specified channels"""
+async def download_messages_async(channels_str: str, limit: int, hours: int) -> tuple[str, str]:
+    """Download messages from specified channels (async version)"""
     channels = [c.strip() for c in channels_str.split(",") if c.strip()]
     if not channels:
         return "Please provide at least one channel name", ""
     
     try:
+        api_id = os.getenv("TELEGRAM_API_ID")
+        api_hash = os.getenv("TELEGRAM_API_HASH")
+        
+        if not api_id or not api_hash:
+            return "Telegram API credentials not found! Please check your .env file.", ""
+        
         ingestion = TelegramChannelIngestion(
-            api_id=os.getenv("TELEGRAM_API_ID"),
-            api_hash=os.getenv("TELEGRAM_API_HASH")
+            api_id=api_id,
+            api_hash=api_hash,
+            storage_dir=str(telegram_data_dir)
         )
         
         await ingestion.start()
@@ -111,75 +199,171 @@ async def download_messages(channels_str: str, limit: int, hours: int) -> tuple[
         finally:
             await ingestion.stop()
     except Exception as e:
-        return f"Error downloading messages: {str(e)}", ""
+        import traceback
+        return f"Error downloading messages: {str(e)}\n{traceback.format_exc()}", ""
+
+def download_messages(channels_str: str, limit: int, hours: int) -> tuple[str, str]:
+    """Download messages from specified channels (sync wrapper)"""
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(download_messages_async(channels_str, limit, hours))
 
 def process_messages() -> str:
     """Process downloaded messages into vector store"""
     try:
-        rag.process_telegram_data_dir()
+        if not telegram_data_dir.exists() or not any(telegram_data_dir.iterdir()):
+            return "No message data found. Please download messages first."
+        
+        rag.process_telegram_data_dir(data_dir=str(telegram_data_dir))
         return "Successfully processed messages into vector store"
     except Exception as e:
-        return f"Error processing messages: {str(e)}"
+        import traceback
+        return f"Error processing messages: {str(e)}\n{traceback.format_exc()}"
 
 def query_messages(query: str, channel: str, num_results: int) -> str:
     """Query the vector store for relevant messages"""
     try:
-        filter_dict = {"channel": channel} if channel else None
+        if not vector_store_path.exists() or not any(vector_store_path.iterdir()):
+            return "Vector store not found. Please process messages first."
+        
+        filter_dict = {"channel": channel} if channel and channel.strip() else None
         results = rag.query_messages(query, k=num_results, filter_dict=filter_dict)
         
         output = []
         for i, doc in enumerate(results, 1):
             output.append(f"Result {i}:")
-            output.append(f"Channel: {doc.metadata['channel']}")
-            output.append(f"Date: {doc.metadata['date']}")
+            output.append(f"Channel: {doc.metadata.get('channel', 'Unknown')}")
+            output.append(f"Date: {doc.metadata.get('date', 'Unknown')}")
             
             # Check if this is an article result
-            if 'article' in doc.metadata:
-                output.append(f"Article Title: {doc.metadata.get('article_title', 'N/A')}")
-                output.append(f"Article URL: {doc.metadata.get('article_url', 'N/A')}")
+            if 'article_title' in doc.metadata:
+                output.append(f"Article Title: {doc.metadata['article_title']}")
+                if 'article_url' in doc.metadata:
+                    output.append(f"Article URL: {doc.metadata['article_url']}")
             
-            output.append(f"Content: {doc.page_content[:200]}...")
+            # Show content snippet
+            content = doc.page_content
+            if len(content) > 300:
+                content = content[:300] + "..."
+            output.append(f"Content: {content}")
             output.append("")
             
         return "\n".join(output) if output else "No results found"
     except Exception as e:
-        return f"Error querying messages: {str(e)}"
+        import traceback
+        return f"Error querying messages: {str(e)}\n{traceback.format_exc()}"
 
 def answer_question(
     question: str,
     channel: str,
     temperature: float,
-    num_context: int
+    num_context: int,
+    show_retrieved: bool = False,
+    repetition_penalty: float = 1.1
 ) -> str:
     """Answer questions about Telegram messages using RAG"""
     try:
-        filter_dict = {"channel": channel} if channel else None
+        if not vector_store_path.exists() or not any(vector_store_path.iterdir()):
+            return "Vector store not found. Please process messages first."
+        
+        if llm is None:
+            return "LLM not initialized. Please check model paths."
+            
+        filter_dict = {"channel": channel} if channel and channel.strip() else None
         
         # Update LLM configuration
         llm.config.temperature = temperature
         llm.config.top_p = 0.9
         llm.config.top_k = 50
-        llm.config.repetition_penalty = 1.1
+        llm.config.repetition_penalty = repetition_penalty
         
-        answer = rag.answer_question(
+        # Make sure model_name is set for prompt template lookup
+        if not hasattr(llm, "model_name"):
+            llm.model_name = DEFAULT_LLM_MODEL
+        
+        # Get answer from RAG
+        result = rag.answer_question(
             question=question,
             llm=llm,
             k=num_context,
-            filter_dict=filter_dict
+            filter_dict=filter_dict,
+            show_retrieved=show_retrieved,
+            reranker=reranker
         )
-        return answer
+        
+        # Format the response
+        if show_retrieved and isinstance(result, dict) and "context_docs" in result:
+            context_docs = []
+            for i, doc in enumerate(result["context_docs"], 1):
+                context_docs.append(f"Document {i}:")
+                context_docs.append(f"Channel: {doc.metadata.get('channel', 'Unknown')}")
+                context_docs.append(f"Date: {doc.metadata.get('date', 'Unknown')}")
+                
+                # Show content snippet
+                content = doc.page_content
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                context_docs.append(f"Content: {content}")
+                context_docs.append("")
+                
+            context_str = "\n".join(context_docs)
+            return f"{result['answer']}\n\n--- Retrieved Context ---\n{context_str}"
+        else:
+            return result if isinstance(result, str) else result.get("answer", "No answer generated")
     except Exception as e:
-        return f"Error answering question: {str(e)}"
+        import traceback
+        return f"Error answering question: {str(e)}\n{traceback.format_exc()}"
 
-# Create Gradio interface
+def download_and_convert_model(model_name: str = "BAAI/bge-small-en-v1.5"):
+    """This function is deprecated and will be removed"""
+    print("Warning: Using deprecated function. Models should be converted using optimum-cli.")
+    return DEFAULT_EMBEDDING_MODEL
+
+# Initialize Gradio interface
 with gr.Blocks(title="Telegram RAG System") as demo:
-    gr.Markdown("# Telegram RAG System")
+    gr.Markdown("# Telegram RAG System with OpenVINO")
+    
+    with gr.Tab("Models & Configuration"):
+        gr.Markdown("## Model Configuration")
+        
+        device_dropdown = gr.Dropdown(
+            choices=["CPU", "GPU", "AUTO"],
+            value=DEFAULT_DEVICE,
+            label="Device for Models"
+        )
+        
+        reload_btn = gr.Button("Reload Models with Selected Device")
+        model_status = gr.Textbox(label="Model Status", value="Models loaded with default settings")
+        
+        # Display current model information
+        model_info = gr.Markdown(f"""
+        ### Current Models:
+        - LLM: {DEFAULT_LLM_MODEL} (INT4)
+        - Embedding: {DEFAULT_EMBEDDING_MODEL}
+        - Reranker: {DEFAULT_RERANK_MODEL}
+        - Device: {DEFAULT_DEVICE}
+        """)
+        
+        def reload_models(device):
+            try:
+                initialize_models(device)
+                initialize_rag()
+                return f"Models reloaded successfully on {device} device"
+            except Exception as e:
+                import traceback
+                return f"Error reloading models: {str(e)}\n{traceback.format_exc()}"
+        
+        reload_btn.click(
+            fn=reload_models,
+            inputs=[device_dropdown],
+            outputs=[model_status]
+        )
     
     with gr.Tab("Download Messages"):
         gr.Markdown("## Download Messages from Telegram Channels")
         channels_input = gr.Textbox(
             label="Channel Names (comma-separated)",
-            placeholder="Enter channel names without @ symbol (e.g., guardian, bloomberg)"
+            placeholder="Enter channel names without @ symbol (e.g., guardian, bloomberg)",
+            value="guardian,bloomberg"
         )
         limit_input = gr.Slider(
             minimum=1,
@@ -210,9 +394,9 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             label="Search Query",
             placeholder="Enter your search query"
         )
-        channel_filter = gr.Dropdown(
-            choices=["", "guardian", "bloomberg"],  # Add more channels as needed
-            label="Filter by Channel (Optional)"
+        channel_filter = gr.Textbox(
+            label="Filter by Channel (Optional)",
+            placeholder="Enter channel name to filter results"
         )
         num_results = gr.Slider(
             minimum=1,
@@ -222,38 +406,59 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             label="Number of Results"
         )
         query_btn = gr.Button("Search")
-        query_output = gr.Textbox(label="Search Results", lines=10)
+        query_output = gr.Textbox(label="Search Results", lines=15)
     
     with gr.Tab("Question Answering"):
         gr.Markdown("## Ask Questions About Messages")
         question_input = gr.Textbox(
             label="Question",
-            placeholder="Ask a question about the Telegram messages"
+            placeholder="Ask a question about the Telegram messages",
+            lines=2
         )
-        qa_channel_filter = gr.Dropdown(
-            choices=["", "guardian", "bloomberg"],  # Add more channels as needed
-            label="Filter by Channel (Optional)"
+        qa_channel_filter = gr.Textbox(
+            label="Filter by Channel (Optional)",
+            placeholder="Enter channel name to filter results"
         )
-        temperature_slider = gr.Slider(
-            minimum=0.1,
-            maximum=1.0,
-            value=0.7,
-            step=0.1,
-            label="Temperature (controls creativity)"
-        )
-        context_slider = gr.Slider(
-            minimum=1,
-            maximum=10,
-            value=5,
-            step=1,
-            label="Number of Messages for Context"
-        )
+        
+        with gr.Row():
+            with gr.Column():
+                temperature_slider = gr.Slider(
+                    minimum=0.1,
+                    maximum=1.0,
+                    value=0.7,
+                    step=0.1,
+                    label="Temperature (controls creativity)",
+                    info="Lower values (0.1-0.4) give more factual responses. Higher values (0.7-1.0) give more creative responses."
+                )
+                context_slider = gr.Slider(
+                    minimum=1,
+                    maximum=100,
+                    value=5,
+                    step=1,
+                    label="Number of Messages for Context",
+                    info="More context can improve answer quality but may slow down response time."
+                )
+            with gr.Column():
+                show_retrieved_checkbox = gr.Checkbox(
+                    label="Show Retrieved Context",
+                    value=False,
+                    info="Display the messages used to generate the answer"
+                )
+                repetition_penalty_slider = gr.Slider(
+                    minimum=1.0,
+                    maximum=1.5,
+                    value=1.1,
+                    step=0.05,
+                    label="Repetition Penalty",
+                    info="Higher values reduce repetition in the response"
+                )
+        
         qa_btn = gr.Button("Get Answer")
-        qa_output = gr.Textbox(label="Answer", lines=10)
+        qa_output = gr.Textbox(label="Answer", lines=15)
     
     # Set up event handlers
     download_btn.click(
-        fn=lambda c, l, h: asyncio.run(download_messages(c, l, h)),
+        fn=download_messages,
         inputs=[channels_input, limit_input, hours_input],
         outputs=[download_status, download_preview]
     )
@@ -276,10 +481,46 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             question_input,
             qa_channel_filter,
             temperature_slider,
-            context_slider
+            context_slider,
+            show_retrieved_checkbox,
+            repetition_penalty_slider
         ],
         outputs=qa_output
     )
 
+# Update the main function
 if __name__ == "__main__":
-    demo.launch() 
+    import sys
+    
+    # Check if models exist
+    missing_models = []
+    if not embedding_model_dir.exists():
+        missing_models.append(f"Embedding model: {embedding_model_dir}")
+    if not rerank_model_dir.exists():
+        missing_models.append(f"Reranker model: {rerank_model_dir}")
+    if not llm_model_dir.exists():
+        missing_models.append(f"LLM model: {llm_model_dir}")
+    
+    if missing_models:
+        print("WARNING: The following models are missing:")
+        for model in missing_models:
+            print(f"  - {model}")
+        print("\nPlease run the notebook to convert these models first.")
+        print("You can still run the app, but some functionality may be limited.")
+    
+    # Check for Telegram API credentials
+    api_id = os.getenv("TELEGRAM_API_ID")
+    api_hash = os.getenv("TELEGRAM_API_HASH")
+    
+    if not api_id or not api_hash:
+        print("WARNING: Telegram API credentials not found in .env file.")
+        print("You will not be able to download messages from Telegram.")
+        print("Please create a .env file with your TELEGRAM_API_ID and TELEGRAM_API_HASH.")
+    
+    # Launch the app
+    try:
+        demo.queue().launch(share=False)
+    except Exception as e:
+        print(f"Error launching Gradio app: {e}")
+        print("Trying with share=True...")
+        demo.queue().launch(share=True) 
