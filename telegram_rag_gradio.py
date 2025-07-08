@@ -13,7 +13,6 @@ from ov_langchain_helper import OpenVINOLLM, OpenVINOBgeEmbeddings, OpenVINORera
 from langchain.retrievers import ContextualCompressionRetriever
 import json
 from datetime import datetime
-from article_processor import ArticleProcessor
 from llm_config import (
     SUPPORTED_EMBEDDING_MODELS,
     SUPPORTED_RERANK_MODELS,
@@ -92,10 +91,8 @@ def initialize_models(device="AUTO"):
             model_path=str(llm_model_dir),
             device=device,
         )
-        # Set model name for prompt template lookup
-        llm.model_name = DEFAULT_LLM_MODEL
         
-        # Set default parameters
+        # Set default parameters from model configuration
         llm.config.max_new_tokens = 1024
         llm.config.temperature = 0.7
         llm.config.top_p = 0.9
@@ -125,9 +122,6 @@ def initialize_rag():
 initialize_models(DEFAULT_DEVICE)
 initialize_rag()
 
-# Initialize article processor
-article_processor = ArticleProcessor()
-
 def format_message(msg):
     """Format a message for display"""
     date = datetime.fromisoformat(msg["date"]).strftime("%Y-%m-%d %H:%M:%S")
@@ -139,24 +133,6 @@ Forwards: {msg.get('forwards', 'N/A')}
 Message: {msg['text'][:200]}...
 {'...' if len(msg['text']) > 200 else ''}
 """
-    
-    # Add article information if available
-    if 'article' in msg and msg['article'].get('text'):
-        article = msg['article']
-        output += f"""
-Article Title: {article.get('title', 'N/A')}
-Article URL: {article.get('url', 'N/A')}
-"""
-        
-        # Check if extraction failed
-        if article.get('extracted') is False:
-            output += f"Article Content: [Extraction failed - {article['text']}]\n"
-        else:
-            # Show content snippet for successfully extracted articles
-            content = article['text']
-            if len(content) > 200:
-                content = content[:200] + "..."
-            output += f"Article Content: {content}\n"
     
     return output
 
@@ -187,15 +163,12 @@ async def download_messages_async(channels_str: str, limit: int, hours: int) -> 
                 since_hours=hours
             )
             
-            # Process messages to extract article content
-            processed_messages = article_processor.process_messages(messages)
-            
             # Format messages for display
-            formatted_messages = "\n\n".join(format_message(msg) for msg in processed_messages[:5])  # Show first 5 messages
-            if len(processed_messages) > 5:
-                formatted_messages += f"\n\n... and {len(processed_messages) - 5} more messages"
+            formatted_messages = "\n\n".join(format_message(msg) for msg in messages[:5])  # Show first 5 messages
+            if len(messages) > 5:
+                formatted_messages += f"\n\n... and {len(messages) - 5} more messages"
                 
-            return f"Successfully downloaded and processed {len(processed_messages)} messages from {len(channels)} channels", formatted_messages
+            return f"Successfully downloaded {len(messages)} messages from {len(channels)} channels", formatted_messages
         finally:
             await ingestion.stop()
     except Exception as e:
@@ -234,12 +207,6 @@ def query_messages(query: str, channel: str, num_results: int) -> str:
             output.append(f"Channel: {doc.metadata.get('channel', 'Unknown')}")
             output.append(f"Date: {doc.metadata.get('date', 'Unknown')}")
             
-            # Check if this is an article result
-            if 'article_title' in doc.metadata:
-                output.append(f"Article Title: {doc.metadata['article_title']}")
-                if 'article_url' in doc.metadata:
-                    output.append(f"Article URL: {doc.metadata['article_url']}")
-            
             # Show content snippet
             content = doc.page_content
             if len(content) > 300:
@@ -275,10 +242,6 @@ def answer_question(
         llm.config.top_p = 0.9
         llm.config.top_k = 50
         llm.config.repetition_penalty = repetition_penalty
-        
-        # Make sure model_name is set for prompt template lookup
-        if not hasattr(llm, "model_name"):
-            llm.model_name = DEFAULT_LLM_MODEL
         
         # Get answer from RAG
         result = rag.answer_question(
