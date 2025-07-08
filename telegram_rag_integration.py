@@ -1,234 +1,271 @@
 from pathlib import Path
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
+from langchain.prompts import PromptTemplate
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 from ov_langchain_helper import OpenVINOBgeEmbeddings
 import openvino as ov
 
 class TelegramRAGIntegration:
+    """Integration class for Telegram RAG system"""
+    
     def __init__(
-        self,
-        embedding_model_name: str = "BAAI/bge-small-en-v1.5",
-        vector_store_path: str = "telegram_vector_store",
-        chunk_size: int = 500,
-        chunk_overlap: int = 50
+        self, 
+        embedding_model=None,
+        embedding_model_name=None,
+        vector_store_path="telegram_vector_store",
+        chunk_size=500,
+        chunk_overlap=50
     ):
         """
-        Initialize the RAG integration for Telegram messages using OpenVINO
+        Initialize the RAG integration
         
         Args:
-            embedding_model_name: Name of the HuggingFace embedding model to use
-            vector_store_path: Path to store/load the vector store
-            chunk_size: Size of text chunks for splitting
+            embedding_model: Pre-initialized embedding model instance
+            embedding_model_name: Path to embedding model (alternative to embedding_model)
+            vector_store_path: Path to store vector embeddings
+            chunk_size: Size of text chunks for embedding
             chunk_overlap: Overlap between chunks
         """
-        self.vector_store_path = Path(vector_store_path)
+        self.vector_store_path = vector_store_path
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
         
-        # Initialize OpenVINO embeddings
-        ov_model_kwargs = {"device_name": "CPU"}
-        self.embeddings = OpenVINOBgeEmbeddings(
-            model_path=embedding_model_name,
-            model_kwargs=ov_model_kwargs,
-            encode_kwargs={"normalize_embeddings": True}
-        )
-
+        # Initialize embedding model
+        if embedding_model is not None:
+            self.embedding = embedding_model
+        elif embedding_model_name is not None:
+            self.embedding = OpenVINOBgeEmbeddings(
+                model_path=str(embedding_model_name),
+                encode_kwargs={
+                    "normalize_embeddings": True,
+                }
+            )
+        else:
+            raise ValueError("Either embedding_model or embedding_model_name must be provided")
+            
+        # Initialize text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap
         )
         
-        # Initialize vector store
-        self.vectorstore = None
-        if self.vector_store_path.exists():
-            try:
-                self.vectorstore = FAISS.load_local(
-                    folder_path=str(self.vector_store_path),
-                    embeddings=self.embeddings,
-                    allow_dangerous_deserialization=True
-                )
-                print(f"Loaded existing vector store from {self.vector_store_path}")
-            except Exception as e:
-                print(f"Error loading vector store: {e}")
-                self.vectorstore = None
+        # Try to load existing vector store
+        try:
+            self.vectorstore = FAISS.load_local(
+                vector_store_path,
+                self.embedding,
+                allow_dangerous_deserialization=True
+            )
+            print(f"Loaded existing vector store from {vector_store_path}")
+        except Exception as e:
+            print(f"Error loading vector store: {str(e)}")
+            self.vectorstore = None
+    
+    def process_telegram_data_dir(self, data_dir="telegram_data"):
+        """Process all telegram data files in the directory"""
+        # Get all JSON files in the data directory
+        data_path = Path(data_dir)
+        json_files = list(data_path.glob("telegram_messages_*.json"))
+        
+        if not json_files:
+            raise FileNotFoundError(f"No telegram message files found in {data_dir}")
             
-    def process_message(self, message: Dict) -> List[Document]:
-        """Convert a Telegram message into Documents"""
+        # Process each file
+        all_documents = []
+        for json_file in json_files:
+            with open(json_file, "r", encoding="utf-8") as f:
+                messages = json.load(f)
+            
+            documents = self._create_documents_from_messages(messages)
+            all_documents.extend(documents)
+            
+        # Create or update vector store
+        if not all_documents:
+            print("No documents to process")
+            return
+            
+        if self.vectorstore is None:
+            self.vectorstore = FAISS.from_documents(all_documents, self.embedding)
+            self.vectorstore.save_local(self.vector_store_path)
+        else:
+            self.vectorstore.add_documents(all_documents)
+            self.vectorstore.save_local(self.vector_store_path)
+            
+        print(f"Processed {len(all_documents)} documents into vector store")
+    
+    def _create_documents_from_messages(self, messages):
+        """Convert messages to documents for the vector store"""
         documents = []
         
-        # Base metadata
-        metadata = {
-            "source": f"telegram_channel_{message['channel']}",
-            "message_id": message["message_id"],
-            "date": message["date"],
-            "channel": message["channel"],
-            "views": message.get("views", 0),
-            "forwards": message.get("forwards", 0)
-        }
-        
-        # Create document for message text
-        if message["text"]:
-            documents.append(Document(
-                page_content=message["text"],
-                metadata=metadata.copy()
-            ))
-        
-        # Create document for article content if available
-        if "article" in message and message["article"].get("text"):
-            article = message["article"]
-            article_metadata = metadata.copy()
-            article_metadata.update({
-                "article_title": article.get("title"),
-                "article_url": article.get("url"),
-                "article_authors": article.get("authors"),
-                "article_publish_date": article.get("publish_date"),
-                "article_top_image": article.get("top_image")
-            })
+        for msg in messages:
+            # Basic message metadata
+            metadata = {
+                "channel": msg["channel"],
+                "date": msg["date"],
+                "message_id": msg.get("id", ""),
+                "views": msg.get("views", 0),
+                "forwards": msg.get("forwards", 0),
+                "type": "message"
+            }
             
-            # Split article content into chunks
-            article_chunks = self.text_splitter.split_text(article["text"])
-            for i, chunk in enumerate(article_chunks):
-                chunk_metadata = article_metadata.copy()
-                chunk_metadata["chunk_index"] = i
-                documents.append(Document(
-                    page_content=chunk,
-                    metadata=chunk_metadata
-                ))
+            # Process main message
+            if msg["text"]:
+                chunks = self.text_splitter.split_text(msg["text"])
+                for i, chunk in enumerate(chunks):
+                    doc_metadata = metadata.copy()
+                    doc_metadata["chunk_id"] = i
+                    documents.append(Document(page_content=chunk, metadata=doc_metadata))
+            
+            # Process article if present
+            if "article" in msg and msg["article"].get("text"):
+                article = msg["article"]
+                article_metadata = metadata.copy()
+                article_metadata["type"] = "article"
+                article_metadata["article_title"] = article.get("title", "")
+                article_metadata["article_url"] = article.get("url", "")
+                
+                # Skip articles that couldn't be extracted properly
+                if article.get("extracted") is False:
+                    # Still create a document with the article URL and title
+                    article_doc_metadata = article_metadata.copy()
+                    article_doc_metadata["chunk_id"] = 0
+                    article_doc_metadata["extraction_failed"] = True
+                    
+                    # Use the article text (which contains our placeholder message)
+                    documents.append(Document(page_content=article["text"], metadata=article_doc_metadata))
+                    continue
+                
+                # Process normal articles
+                article_chunks = self.text_splitter.split_text(article["text"])
+                for i, chunk in enumerate(article_chunks):
+                    article_doc_metadata = article_metadata.copy()
+                    article_doc_metadata["chunk_id"] = i
+                    documents.append(Document(page_content=chunk, metadata=article_doc_metadata))
         
         return documents
     
-    def load_messages(self, json_file: Path) -> List[Dict]:
-        """Load messages from a JSON file"""
-        with open(json_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-            
-    def add_messages_to_vectorstore(
-        self,
-        messages: List[Dict],
-        batch_size: int = 100
-    ):
-        """Process messages and add them to the vector store"""
-        # Convert messages to documents
-        all_documents = []
-        for msg in messages:
-            all_documents.extend(self.process_message(msg))
-        
-        # Split documents into chunks
-        chunks = self.text_splitter.split_documents(all_documents)
-        
-        # Initialize vector store if needed
+    def query_messages(self, query, k=5, filter_dict=None):
+        """Query the vector store for relevant messages"""
         if self.vectorstore is None:
-            self.vectorstore = FAISS.from_documents(
-                chunks[:batch_size],
-                self.embeddings
-            )
-            chunks = chunks[batch_size:]
+            raise ValueError("Vector store not initialized. Please process messages first.")
             
-        # Add remaining chunks in batches
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
-            self.vectorstore.add_documents(batch)
-            
-        # Save the updated vector store
-        self.save_vectorstore()
-        
-    def save_vectorstore(self):
-        """Save the vector store to disk"""
-        if self.vectorstore is not None:
-            self.vectorstore.save_local(
-                folder_path=str(self.vector_store_path)
-            )
-            print(f"Saved vector store to {self.vector_store_path}")
-        else:
-            print("No vector store to save")
-        
-    def process_telegram_data_dir(
-        self,
-        data_dir: str = "telegram_data",
-        batch_size: int = 100
-    ):
-        """Process all JSON files in the telegram data directory"""
-        data_path = Path(data_dir)
-        if not data_path.exists():
-            raise ValueError(f"Data directory {data_dir} does not exist")
-            
-        for json_file in data_path.glob("telegram_messages_*.json"):
-            messages = self.load_messages(json_file)
-            self.add_messages_to_vectorstore(messages, batch_size)
-            
-    def query_messages(
-        self,
-        query: str,
-        k: int = 5,
-        filter_dict: Dict = None
-    ) -> List[Document]:
-        """
-        Query the vector store for relevant messages
-        
-        Args:
-            query: The search query
-            k: Number of results to return
-            filter_dict: Optional filter criteria (e.g., {"channel": "specific_channel"})
-            
-        Returns:
-            List of relevant documents
-        """
-        if self.vectorstore is None:
-            raise ValueError("Vector store has not been initialized with any messages")
-            
-        return self.vectorstore.similarity_search(
-            query,
-            k=k,
-            filter=filter_dict
-        )
-
+        results = self.vectorstore.similarity_search(query, k=k, filter=filter_dict)
+        return results
+    
     def answer_question(
-        self,
-        question: str,
-        llm: Any,
-        k: int = 5,
-        filter_dict: Dict = None
-    ) -> str:
+        self, 
+        question, 
+        llm, 
+        retriever=None, 
+        k=5, 
+        filter_dict=None,
+        show_retrieved=False,
+        reranker=None
+    ) -> Union[str, Dict[str, Any]]:
         """
-        Answer a question about Telegram messages using RAG
+        Answer a question using RAG
         
         Args:
             question: The question to answer
-            llm: The language model to use for generation
-            k: Number of relevant messages to retrieve
-            filter_dict: Optional filter criteria for messages
+            llm: The language model to use
+            retriever: Optional pre-configured retriever
+            k: Number of documents to retrieve
+            filter_dict: Filter for retrieval
+            show_retrieved: Whether to include retrieved documents in the result
+            reranker: Optional reranker to improve retrieval quality
             
         Returns:
-            Generated answer based on retrieved context
+            Answer string or dict with answer and context
         """
-        # Retrieve relevant messages
-        relevant_docs = self.query_messages(question, k=k, filter_dict=filter_dict)
+        if self.vectorstore is None:
+            raise ValueError("Vector store not initialized. Please process messages first.")
         
-        # Prepare context from retrieved messages
-        context = "\n\n".join([doc.page_content for doc in relevant_docs])
-        
-        # Create prompt template
-        prompt_template = """You are a helpful assistant that answers questions about Telegram messages.
-        Use the following pieces of context to answer the question. If you don't know the answer, just say that you don't know.
-        Keep the answer concise and relevant to the question.
-
-        Context:
-        {context}
-
-        Question: {question}
-
-        Answer:"""
-        
-        # Format prompt
-        prompt = prompt_template.format(
-            context=context,
-            question=question
-        )
-        
-        # Generate answer using invoke method
-        return llm.invoke(prompt)
+        try:
+            # Create retriever if not provided
+            if retriever is None:
+                # Use standard similarity search
+                vector_search_top_k = k * 2 if reranker else k  # Retrieve more for reranking
+                retriever = self.vectorstore.as_retriever(
+                    search_kwargs={"k": vector_search_top_k, "filter": filter_dict},
+                    search_type="similarity"
+                )
+                
+                # Add reranking if available
+                if reranker:
+                    from langchain.retrievers import ContextualCompressionRetriever
+                    reranker.top_n = k
+                    retriever = ContextualCompressionRetriever(
+                        base_compressor=reranker,
+                        base_retriever=retriever
+                    )
+            
+            # Try to get model-specific prompt template
+            rag_prompt_template = None
+            try:
+                from llm_config import SUPPORTED_LLM_MODELS
+                for language, models in SUPPORTED_LLM_MODELS.items():
+                    for model_id, config in models.items():
+                        if hasattr(llm, "model_name") and model_id in str(llm.model_name) and "rag_prompt_template" in config:
+                            rag_prompt_template = config["rag_prompt_template"]
+                            break
+                    if rag_prompt_template:
+                        break
+            except (ImportError, AttributeError):
+                pass
+            
+            # Use default prompt if model-specific one is not available
+            if not rag_prompt_template:
+                rag_prompt_template = """
+                You are a helpful assistant that answers questions based on Telegram messages and news articles.
+                
+                CONTEXT:
+                {context}
+                
+                QUESTION:
+                {input}
+                
+                INSTRUCTIONS:
+                1. Answer the question directly and concisely based on the context provided.
+                2. If the context contains relevant information, use it to provide a detailed answer.
+                3. If the context doesn't contain enough information to fully answer the question, provide whatever partial information is available.
+                4. Focus on extracting key facts and insights from the context.
+                5. Don't be overly cautious - if there's information in the context that's relevant, use it confidently.
+                
+                ANSWER:
+                """
+            
+            # Create prompt
+            prompt = PromptTemplate.from_template(rag_prompt_template)
+            
+            # Create RAG chain
+            combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+            rag_chain = create_retrieval_chain(retriever, combine_docs_chain)
+            
+            # Run the chain
+            response = rag_chain.invoke({"input": question})
+            
+            # Return the result
+            if show_retrieved and "context" in response:
+                return {
+                    "answer": response["answer"],
+                    "context_docs": response["context"]
+                }
+            else:
+                return response["answer"]
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"Error answering question: {str(e)}\n{traceback.format_exc()}"
+            if show_retrieved:
+                return {"answer": error_msg, "context_docs": []}
+            else:
+                return error_msg
 
 # Example usage:
 def main():
