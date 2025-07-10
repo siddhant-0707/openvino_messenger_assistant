@@ -22,3 +22,7 @@ To use the Telegram integration functionality, follow these steps:
    - Or explore the functionality in the `telegram_rag_example.ipynb` notebook
 
 Note: Keep your `api_id` and `api_hash` confidential and never share them publicly.
+
+### Sample Screenshot
+
+![Sample Screenshot](docs/images/sample.png)
