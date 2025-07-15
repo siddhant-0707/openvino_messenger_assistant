@@ -276,6 +276,184 @@ def answer_question(
         import traceback
         return f"Error answering question: {str(e)}\n{traceback.format_exc()}"
 
+def answer_question_stream(
+    question: str,
+    channel: str,
+    temperature: float,
+    num_context: int,
+    show_retrieved: bool = False,
+    repetition_penalty: float = 1.1,
+    progress=gr.Progress()
+):
+    """Answer questions about Telegram messages using RAG with streaming output"""
+    try:
+        if not vector_store_path.exists() or not any(vector_store_path.iterdir()):
+            return "Vector store not found. Please process messages first."
+        
+        if llm is None:
+            return "LLM not initialized. Please check model paths."
+            
+        filter_dict = {"channel": channel} if channel and channel.strip() else None
+        
+        # Update LLM configuration
+        llm.config.temperature = temperature
+        llm.config.top_p = 0.9
+        llm.config.top_k = 50
+        llm.config.repetition_penalty = repetition_penalty
+        
+        progress(0, desc="Retrieving relevant documents...")
+        
+        # Set up streaming for the LLM
+        # First retrieve context documents from the vector store
+        retriever = rag.vectorstore.as_retriever(
+            search_kwargs={"k": num_context * 2 if reranker else num_context, "filter": filter_dict},
+            search_type="similarity"
+        )
+        
+        # Add reranking if available
+        if reranker:
+            from langchain.retrievers import ContextualCompressionRetriever
+            reranker.top_n = num_context
+            retriever = ContextualCompressionRetriever(
+                base_compressor=reranker,
+                base_retriever=retriever
+            )
+        
+        # Get context documents
+        context_docs = retriever.get_relevant_documents(question)
+        
+        progress(0.2, desc="Preparing prompt...")
+        
+        # Try to get model-specific prompt template
+        rag_prompt_template = None
+        try:
+            from llm_config import SUPPORTED_LLM_MODELS
+            for language, models in SUPPORTED_LLM_MODELS.items():
+                for model_id, config in models.items():
+                    if hasattr(llm, "model_name") and model_id in str(llm.model_name) and "rag_prompt_template" in config:
+                        rag_prompt_template = config["rag_prompt_template"]
+                        break
+                if rag_prompt_template:
+                    break
+        except (ImportError, AttributeError):
+            pass
+        
+        # Use default prompt if model-specific one is not available
+        if not rag_prompt_template:
+            rag_prompt_template = """
+            You are a helpful assistant that answers questions based on Telegram messages and news articles.
+            
+            CONTEXT:
+            {context}
+            
+            QUESTION:
+            {input}
+            
+            INSTRUCTIONS:
+            1. Answer the question directly and concisely based on the context provided.
+            2. If the context contains relevant information, use it to provide a detailed answer.
+            3. If the context doesn't contain enough information to fully answer the question, provide whatever partial information is available.
+            4. Focus on extracting key facts and insights from the context.
+            5. Don't be overly cautious - if there's information in the context that's relevant, use it confidently.
+            
+            ANSWER:
+            """
+        
+        from langchain.prompts import PromptTemplate
+        prompt = PromptTemplate.from_template(rag_prompt_template)
+        
+        # Format the context from documents
+        context_str = "\n\n".join([doc.page_content for doc in context_docs])
+        prompt_text = prompt.format(context=context_str, input=question)
+        
+        progress(0.4, desc="Generating response...")
+        
+        # Stream the response using callback updates
+        output_text = ""
+        
+        # Set up a queue for the stream of tokens
+        from threading import Thread
+        import time
+        from queue import Queue
+        
+        token_queue = Queue()
+        stop_event = False
+        
+        def stream_tokens():
+            nonlocal stop_event
+            for chunk in llm._stream(prompt_text):
+                if stop_event:
+                    break
+                token_queue.put(chunk.text)
+            token_queue.put(None)  # Signal end of stream
+        
+        # Start the streaming in a background thread
+        thread = Thread(target=stream_tokens)
+        thread.start()
+        
+        # Process tokens with batching for UI updates
+        buffer = ""
+        last_update_time = time.time()
+        update_interval = 0.1  # Update UI every 0.1 seconds
+        
+        progress_val = 0.4
+        progress_step = 0.1
+        next_progress = 0.5
+        
+        while True:
+            token = token_queue.get()
+            if token is None:
+                break
+                
+            buffer += token
+            current_time = time.time()
+            
+            # Update UI if enough time has passed or buffer contains special characters
+            if (current_time - last_update_time > update_interval or 
+                any(c in buffer for c in ["\n", ".", "!", "?"])):
+                output_text += buffer
+                yield output_text
+                buffer = ""
+                last_update_time = current_time
+                
+                # Update progress
+                if progress_val < next_progress:
+                    progress_val = min(0.9, progress_val + progress_step)
+                    progress(progress_val, desc="Generating response...")
+        
+        # Add any remaining buffered content
+        if buffer:
+            output_text += buffer
+            yield output_text
+        
+        # Handle context display if requested
+        if show_retrieved and context_docs:
+            progress(0.95, desc="Adding context information...")
+            context_info = []
+            context_info.append("\n\n--- Retrieved Context ---")
+            for i, doc in enumerate(context_docs, 1):
+                context_info.append(f"Document {i}:")
+                context_info.append(f"Channel: {doc.metadata.get('channel', 'Unknown')}")
+                context_info.append(f"Date: {doc.metadata.get('date', 'Unknown')}")
+                
+                # Show content snippet
+                content = doc.page_content
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                context_info.append(f"Content: {content}")
+                context_info.append("")
+            
+            context_display = "\n".join(context_info)
+            output_text += context_display
+            yield output_text
+        
+        progress(1.0, desc="Complete!")
+        return output_text
+
+    except Exception as e:
+        import traceback
+        return f"Error answering question: {str(e)}\n{traceback.format_exc()}"
+
 def download_and_convert_model(model_name: str = "BAAI/bge-small-en-v1.5"):
     """This function is deprecated and will be removed"""
     print("Warning: Using deprecated function. Models should be converted using optimum-cli.")
@@ -373,6 +551,7 @@ with gr.Blocks(title="Telegram RAG System") as demo:
     
     with gr.Tab("Question Answering"):
         gr.Markdown("## Ask Questions About Messages")
+        gr.Markdown("Answers are streamed in real-time as they are generated, so you can see the response as it's being written.")
         question_input = gr.Textbox(
             label="Question",
             placeholder="Ask a question about the Telegram messages",
@@ -439,7 +618,7 @@ with gr.Blocks(title="Telegram RAG System") as demo:
     )
     
     qa_btn.click(
-        fn=answer_question,
+        fn=answer_question_stream,
         inputs=[
             question_input,
             qa_channel_filter,
