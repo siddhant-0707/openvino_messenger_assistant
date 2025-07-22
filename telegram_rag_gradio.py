@@ -10,7 +10,9 @@ import openvino as ov
 from openvino_tokenizers import convert_tokenizer
 from transformers import AutoTokenizer, AutoModel
 from ov_langchain_helper import OpenVINOLLM, OpenVINOBgeEmbeddings, OpenVINOReranker
+from langchain.vectorstores import FAISS
 from langchain.retrievers import ContextualCompressionRetriever
+from langchain.chains import RetrievalQA
 import json
 from datetime import datetime
 from llm_config import (
@@ -25,16 +27,29 @@ nest_asyncio.apply()
 # Load environment variables
 load_dotenv()
 
-# Setup directories
-telegram_data_dir = Path("telegram_data")
+# Global variables for RAG system
+embedding = None
+reranker = None
+llm = None
+retriever = None
+rag_chain = None
+
+# Setup directories - organized structure for data and models
+models_dir = Path(".models")
+models_dir.mkdir(exist_ok=True)
+
+data_dir = Path(".data")
+data_dir.mkdir(exist_ok=True)
+
+telegram_data_dir = data_dir / "telegram_data"
 telegram_data_dir.mkdir(exist_ok=True)
 
-vector_store_path = Path("telegram_vector_store")
+vector_store_path = data_dir / "telegram_vector_store"
 vector_store_path.mkdir(exist_ok=True)
 
 # Default model selections
 DEFAULT_LANGUAGE = "English"
-DEFAULT_LLM_MODEL = "qwen2.5-3b-instruct"
+DEFAULT_LLM_MODEL = "DeepSeek-R1-Distill-Qwen-1.5B"
 DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 DEFAULT_RERANK_MODEL = "bge-reranker-v2-m3"
 DEFAULT_DEVICE = "AUTO"
@@ -44,79 +59,362 @@ embedding_model_configuration = SUPPORTED_EMBEDDING_MODELS[DEFAULT_LANGUAGE][DEF
 rerank_model_configuration = SUPPORTED_RERANK_MODELS[DEFAULT_RERANK_MODEL]
 llm_model_configuration = SUPPORTED_LLM_MODELS[DEFAULT_LANGUAGE][DEFAULT_LLM_MODEL]
 
-# Model paths
-embedding_model_dir = Path(DEFAULT_EMBEDDING_MODEL)
-rerank_model_dir = Path(DEFAULT_RERANK_MODEL)
-llm_base_dir = Path(DEFAULT_LLM_MODEL)
-llm_model_dir = llm_base_dir / "INT4_compressed_weights"
+# Use OpenVINO preconverted model paths from Hugging Face
+def get_ov_model_path(model_name, precision="int4"):
+    """Get the local path for OpenVINO preconverted models"""
+    return models_dir / f"{model_name}_{precision}_ov"
+
+def download_ov_model_if_needed(model_name, precision="int4", model_type="llm"):
+    """Download OpenVINO preconverted model from Hugging Face if not already present"""
+    import huggingface_hub as hf_hub
+    
+    model_dir = get_ov_model_path(model_name, precision)
+    
+    if model_dir.exists() and (model_dir / "openvino_model.xml").exists():
+        print(f"✅ OpenVINO {precision.upper()} {model_name} already exists at {model_dir}")
+        return model_dir
+    
+    # Construct OpenVINO model hub ID based on model type
+    if model_type == "llm":
+        # LLM models follow the pattern: OpenVINO/{model_name}-{precision}-ov
+        ov_model_hub_id = f"OpenVINO/{model_name}-{precision}-ov"
+    elif model_type == "embedding":
+        # Embedding models: OpenVINO/bge-base-en-v1.5-int8-ov
+        if model_name == "bge-small-en-v1.5":
+            ov_model_hub_id = "OpenVINO/bge-base-en-v1.5-int8-ov"
+        else:
+            ov_model_hub_id = f"OpenVINO/{model_name}-{precision}-ov"
+    elif model_type == "rerank":
+        # Reranking models: OpenVINO/bge-reranker-base-int8-ov  
+        if model_name == "bge-reranker-v2-m3":
+            ov_model_hub_id = "OpenVINO/bge-reranker-base-int8-ov"
+        else:
+            ov_model_hub_id = f"OpenVINO/{model_name}-{precision}-ov"
+    else:
+        ov_model_hub_id = f"OpenVINO/{model_name}-{precision}-ov"
+    
+    try:
+        print(f"📥 Downloading OpenVINO {precision.upper()} {model_name} from {ov_model_hub_id}...")
+        
+        # Download the model to our models directory
+        local_path = hf_hub.snapshot_download(
+            repo_id=ov_model_hub_id,
+            local_dir=model_dir,
+            local_dir_use_symlinks=False
+        )
+        
+        if (model_dir / "openvino_model.xml").exists():
+            print(f"✅ OpenVINO {precision.upper()} {model_name} downloaded successfully to {model_dir}")
+            return model_dir
+        else:
+            print(f"❌ Downloaded model at {model_dir} is missing openvino_model.xml")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error downloading OpenVINO {precision.upper()} {model_name}: {e}")
+        return None
+
+# Model paths - now using OpenVINO preconverted models
+embedding_model_dir = download_ov_model_if_needed(DEFAULT_EMBEDDING_MODEL, "int8", "embedding") or Path(DEFAULT_EMBEDDING_MODEL)
+rerank_model_dir = download_ov_model_if_needed(DEFAULT_RERANK_MODEL, "int8", "rerank") or Path(DEFAULT_RERANK_MODEL)
+llm_model_dir = download_ov_model_if_needed(DEFAULT_LLM_MODEL, "int4", "llm") or get_ov_model_path(DEFAULT_LLM_MODEL, "int4")
 
 # Initialize models
 embedding = None
 reranker = None
 llm = None
 
+def get_available_devices():
+    """Get available OpenVINO devices with descriptive GPU names"""
+    import openvino as ov
+    
+    try:
+        core = ov.Core()
+        available_devices = core.available_devices
+        
+        # Create detailed device options with descriptive names
+        device_options = ["CPU", "AUTO"]
+        
+        gpu_count = 0
+        for device in available_devices:
+            if device.startswith("GPU"):
+                gpu_count += 1
+                try:
+                    # Try to get device properties for more info
+                    device_name = core.get_property(device, "FULL_DEVICE_NAME")
+                    
+                    # Create descriptive names based on known patterns
+                    if "Intel" in device_name or "UHD" in device_name or "Iris" in device_name:
+                        descriptive_name = f"GPU.{gpu_count-1} (Intel Graphics)"
+                    elif "NVIDIA" in device_name or "GeForce" in device_name or "RTX" in device_name:
+                        descriptive_name = f"GPU.{gpu_count-1} (NVIDIA)"
+                    elif "AMD" in device_name or "Radeon" in device_name:
+                        descriptive_name = f"GPU.{gpu_count-1} (AMD)"
+                    else:
+                        # Extract meaningful parts of the device name
+                        short_name = device_name.split()[0:2]  # First two words
+                        descriptive_name = f"GPU.{gpu_count-1} ({' '.join(short_name)})"
+                    
+                    device_options.append(descriptive_name)
+                    
+                except Exception:
+                    # Fallback if we can't get device properties
+                    if gpu_count == 1:
+                        device_options.append(f"GPU.0 (Primary)")
+                    else:
+                        device_options.append(f"GPU.{gpu_count-1} (Secondary)")
+        
+        # Add generic GPU option if multiple GPUs exist
+        if gpu_count > 1:
+            device_options.append("GPU (Auto-select)")
+        elif gpu_count == 1:
+            device_options.append("GPU (Generic)")
+        
+        return device_options
+    
+    except Exception as e:
+        print(f"Error getting devices: {e}")
+        return ["CPU", "AUTO", "GPU"]
+
+def get_optimized_device_config(device="AUTO"):
+    """Get optimized device configuration for OpenVINO models"""
+    import openvino.properties as props
+    import openvino.properties.hint as hints
+    import openvino.properties.streams as streams
+    
+    config = {
+        hints.performance_mode(): hints.PerformanceMode.LATENCY,
+        streams.num(): "1",
+        props.cache_dir(): "",
+    }
+    
+    if "GPU" in device:
+        # GPU-specific optimizations
+        config.update({
+            # Reduce memory usage
+            "GPU_ENABLE_SDPA_OPTIMIZATION": "NO",
+            # Limit parallel execution
+            hints.execution_mode(): hints.ExecutionMode.ACCURACY,
+            # Conservative memory management
+            "GPU_MEMORY_OPTIMIZATION": "YES",
+        })
+    
+    return config
+
+def parse_device_name(device_selection):
+    """Parse the user-friendly device name to get the actual OpenVINO device ID"""
+    if device_selection in ["CPU", "AUTO"]:
+        return device_selection
+    elif device_selection.startswith("GPU."):
+        # Extract GPU number from "GPU.0 (Intel Graphics)" -> "GPU.0"
+        gpu_id = device_selection.split(" ")[0]  # "GPU.0"
+        return gpu_id
+    elif "GPU" in device_selection:
+        # Generic GPU selection
+        return "GPU"
+    else:
+        return device_selection
+
 def initialize_models(device="AUTO"):
-    """Initialize all models with the specified device"""
+    """Initialize all models with the specified device and optimized configuration"""
     global embedding, reranker, llm
     
-    # Initialize embedding model
-    if embedding_model_dir.exists():
-        embedding = OpenVINOBgeEmbeddings(
-            model_path=str(embedding_model_dir),
-            model_kwargs={"device_name": device},
-            encode_kwargs={
-                "mean_pooling": embedding_model_configuration["mean_pooling"],
-                "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
-                "batch_size": 4,
-            }
-        )
-        print(f"Embedding model loaded from {embedding_model_dir}")
-    else:
-        print(f"Embedding model not found at {embedding_model_dir}")
+    # Parse the device selection to get actual OpenVINO device ID
+    actual_device = parse_device_name(device)
     
-    # Initialize reranker model
-    if rerank_model_dir.exists():
-        reranker = OpenVINOReranker(
-            model_path=str(rerank_model_dir),
-            model_kwargs={"device_name": device},
-            top_n=5,
-        )
-        print(f"Reranking model loaded from {rerank_model_dir}")
-    else:
-        print(f"Reranking model not found at {rerank_model_dir}")
-    
-    # Initialize LLM
-    if llm_model_dir.exists():
-        llm = OpenVINOLLM.from_model_path(
-            model_path=str(llm_model_dir),
-            device=device,
-        )
+    try:
+        # Initialize embedding model with simplified config
+        if embedding_model_dir and embedding_model_dir.exists():
+            try:
+                # Simple device config for embedding models
+                embedding_config = {"device_name": actual_device}
+                
+                embedding = OpenVINOBgeEmbeddings(
+                    model_path=str(embedding_model_dir),
+                    model_kwargs=embedding_config,
+                    encode_kwargs={
+                        "mean_pooling": embedding_model_configuration["mean_pooling"],
+                        "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
+                        "batch_size": 2 if "GPU" in actual_device else 4,  # Reduce batch size for GPU
+                    }
+                )
+                print(f"✅ Embedding model loaded from {embedding_model_dir} on {device} ({actual_device})")
+            except Exception as e:
+                print(f"❌ Error loading embedding model on {device} ({actual_device}): {e}")
+                if actual_device != "CPU":
+                    print("🔄 Falling back to CPU for embedding model...")
+                    embedding = OpenVINOBgeEmbeddings(
+                        model_path=str(embedding_model_dir),
+                        model_kwargs={"device_name": "CPU"},
+                        encode_kwargs={
+                            "mean_pooling": embedding_model_configuration["mean_pooling"],
+                            "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
+                            "batch_size": 4,
+                        }
+                    )
+                    print(f"✅ Embedding model loaded on CPU (fallback)")
+                else:
+                    embedding = None
+        else:
+            print(f"❌ Embedding model not found at {embedding_model_dir}")
+            embedding = None
         
-        # Set default parameters from model configuration
-        llm.config.max_new_tokens = 1024
-        llm.config.temperature = 0.7
-        llm.config.top_p = 0.9
-        llm.config.top_k = 50
-        llm.config.repetition_penalty = 1.1
-        llm.config.do_sample = True
-        print(f"LLM loaded from {llm_model_dir}")
-    else:
-        print(f"LLM not found at {llm_model_dir}")
+        # Initialize reranker model with simplified config
+        if rerank_model_dir and rerank_model_dir.exists():
+            try:
+                # Simple device config for reranker models
+                reranker_config = {"device_name": actual_device}
+                
+                reranker = OpenVINOReranker(
+                    model_path=str(rerank_model_dir),
+                    model_kwargs=reranker_config,
+                    top_n=3 if "GPU" in actual_device else 5,  # Reduce top_n for GPU to save memory
+                )
+                print(f"✅ Reranking model loaded from {rerank_model_dir} on {device} ({actual_device})")
+            except Exception as e:
+                print(f"❌ Error loading reranking model on {device} ({actual_device}): {e}")
+                if actual_device != "CPU":
+                    print("🔄 Falling back to CPU for reranking model...")
+                    reranker = OpenVINOReranker(
+                        model_path=str(rerank_model_dir),
+                        model_kwargs={"device_name": "CPU"},
+                        top_n=5,
+                    )
+                    print(f"✅ Reranking model loaded on CPU (fallback)")
+                else:
+                    reranker = None
+        else:
+            print(f"❌ Reranking model not found at {rerank_model_dir}")
+            reranker = None
+        
+        # Initialize LLM with enhanced config only for supported models
+        if llm_model_dir and llm_model_dir.exists():
+            try:
+                # Enhanced config for LLM models (these support more properties)
+                llm_kwargs = {}
+                if "GPU" in actual_device:
+                    # Only add GPU-specific properties that are known to work
+                    import openvino.properties as props
+                    import openvino.properties.hint as hints
+                    import openvino.properties.streams as streams
+                    
+                    llm_kwargs = {
+                        props.hint.performance_mode(): hints.PerformanceMode.LATENCY,
+                        streams.num(): "1",
+                        "GPU_ENABLE_SDPA_OPTIMIZATION": "NO",
+                    }
+                
+                llm = OpenVINOLLM.from_model_path(
+                    model_path=str(llm_model_dir),
+                    device=actual_device,
+                    **llm_kwargs
+                )
+                
+                # Set conservative parameters for GPU to avoid memory issues
+                if "GPU" in actual_device:
+                    llm.config.max_new_tokens = 512  # Reduced for GPU
+                    llm.config.temperature = 0.7
+                    llm.config.top_p = 0.9
+                    llm.config.top_k = 40  # Reduced for GPU
+                    llm.config.repetition_penalty = 1.1
+                    llm.config.do_sample = True
+                else:
+                    # Standard parameters for CPU
+                    llm.config.max_new_tokens = 1024
+                    llm.config.temperature = 0.7
+                    llm.config.top_p = 0.9
+                    llm.config.top_k = 50
+                    llm.config.repetition_penalty = 1.1
+                    llm.config.do_sample = True
+                
+                print(f"✅ LLM loaded from {llm_model_dir} on {device} ({actual_device})")
+            except Exception as e:
+                print(f"❌ Error loading LLM on {device} ({actual_device}): {e}")
+                if actual_device != "CPU":
+                    print("🔄 Falling back to CPU for LLM...")
+                    llm = OpenVINOLLM.from_model_path(
+                        model_path=str(llm_model_dir),
+                        device="CPU",
+                    )
+                    llm.config.max_new_tokens = 1024
+                    llm.config.temperature = 0.7
+                    llm.config.top_p = 0.9
+                    llm.config.top_k = 50
+                    llm.config.repetition_penalty = 1.1
+                    llm.config.do_sample = True
+                    print(f"✅ LLM loaded on CPU (fallback)")
+                else:
+                    llm = None
+        else:
+            print(f"❌ LLM not found at {llm_model_dir}")
+            llm = None
+    
+    except Exception as e:
+        print(f"❌ Critical error during model initialization: {e}")
+        print("🔄 Falling back to CPU for all models...")
+        # Fallback to CPU for all models
+        if actual_device != "CPU":
+            initialize_models("CPU")
 
-# Initialize RAG system
 def initialize_rag():
-    """Initialize the RAG system with the current models"""
-    global rag
-    if embedding is not None:
-        rag = TelegramRAGIntegration(
-            embedding_model=embedding,
-            vector_store_path=str(vector_store_path),
-            chunk_size=500,
-            chunk_overlap=50
-        )
-        print("RAG system initialized with embedding model")
-    else:
-        print("Cannot initialize RAG system: embedding model not loaded")
+    """Initialize RAG system"""
+    global retriever, rag_chain
+    
+    if embedding is None:
+        print("❌ Embedding model not available, cannot initialize RAG")
+        return False
+    
+    try:
+        # Load existing vector store from new location
+        if vector_store_path.exists() and any(vector_store_path.iterdir()):
+            vector_store = FAISS.load_local(str(vector_store_path), embedding, allow_dangerous_deserialization=True)
+            print(f"📚 Loaded existing vector store from {vector_store_path}")
+        else:
+            print(f"📚 No existing vector store found at {vector_store_path}")
+            return False
+        
+        # Set up base retriever
+        retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+        
+        # Wrap with reranker if available
+        if reranker is not None:
+            retriever = ContextualCompressionRetriever(
+                base_compressor=reranker,
+                base_retriever=retriever
+            )
+            print("🔄 RAG system initialized with reranking")
+        else:
+            print("🔍 RAG system initialized with basic retrieval")
+        
+        # Set up RAG chain
+        if llm is not None:
+            rag_chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type="stuff",
+                retriever=retriever,
+                return_source_documents=True
+            )
+            print("💬 RAG system initialized with LLM")
+        else:
+            print("❌ LLM not available, RAG chain not initialized")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error initializing RAG system: {e}")
+        return False
+
+# Initialize models (with new directory structure)
+print("📁 Setting up organized directory structure:")
+print(f"  - Models: {models_dir.absolute()}")
+print(f"  - Data: {data_dir.absolute()}")
+print(f"  - Telegram Data: {telegram_data_dir.absolute()}")
+print(f"  - Vector Store: {vector_store_path.absolute()}")
+
+embedding_model_dir = download_ov_model_if_needed(DEFAULT_EMBEDDING_MODEL, "int8", "embedding") or get_ov_model_path(DEFAULT_EMBEDDING_MODEL, "int8")
+rerank_model_dir = download_ov_model_if_needed(DEFAULT_RERANK_MODEL, "int8", "rerank") or get_ov_model_path(DEFAULT_RERANK_MODEL, "int8")
+llm_model_dir = download_ov_model_if_needed(DEFAULT_LLM_MODEL, "int4", "llm") or get_ov_model_path(DEFAULT_LLM_MODEL, "int4")
 
 # Initialize models with default device
 initialize_models(DEFAULT_DEVICE)
@@ -459,6 +757,133 @@ def download_and_convert_model(model_name: str = "BAAI/bge-small-en-v1.5"):
     print("Warning: Using deprecated function. Models should be converted using optimum-cli.")
     return DEFAULT_EMBEDDING_MODEL
 
+def get_available_openvino_llm_models():
+    """Fetch available LLM models from OpenVINO Hugging Face collection"""
+    import huggingface_hub as hf_hub
+    
+    try:
+        # Get models from the OpenVINO LLM collection
+        collection_models = hf_hub.get_collection("OpenVINO/llm-6687aaa2abca3bbcec71a9bd")
+        
+        available_models = {}
+        
+        for item in collection_models.items:
+            if hasattr(item, 'item_id'):
+                repo_name = item.item_id.replace("OpenVINO/", "")
+                
+                # Skip if doesn't end with -ov
+                if not repo_name.endswith("-ov"):
+                    continue
+                
+                # Remove -ov suffix
+                model_id = repo_name[:-3]
+                
+                # Extract precision from the end
+                precision = None
+                if model_id.endswith("-int4"):
+                    precision = "int4"
+                    model_name = model_id[:-5]  # Remove -int4
+                elif model_id.endswith("-int8"):
+                    precision = "int8"
+                    model_name = model_id[:-5]  # Remove -int8
+                elif model_id.endswith("-fp16"):
+                    precision = "fp16"
+                    model_name = model_id[:-5]  # Remove -fp16
+                else:
+                    continue  # Skip if precision not recognized
+                
+                # Convert model name to standard format
+                # Handle special cases in model naming
+                model_name = model_name.lower()
+                
+                # Map common model naming variations
+                name_mappings = {
+                    "tinyllama-1.1b-chat-v1.0": "tinyllama-1.1b-chat-v1.0",
+                    "qwen2.5-3b-instruct": "qwen2.5-3b-instruct",
+                    "qwen2.5-7b-instruct": "qwen2.5-7b-instruct", 
+                    "qwen2.5-14b-instruct": "qwen2.5-14b-instruct",
+                    "qwen2.5-1.5b-instruct": "qwen2.5-1.5b-instruct",
+                    "qwen2.5-0.5b-instruct": "qwen2.5-0.5b-instruct",
+                    "phi-3.5-mini-instruct": "phi-3.5-mini-instruct",
+                    "phi-4-mini-instruct": "phi-4-mini-instruct",
+                    "gemma-2-9b-it": "gemma-2-9b-it",
+                    "mistral-7b-instruct-v0.1": "mistral-7b-instruct-v0.1",
+                    "neural-chat-7b-v3-3": "neural-chat-7b-v3-3",
+                    "deepseek-r1-distill-qwen-1.5b": "deepseek-r1-distill-qwen-1.5b",
+                    "deepseek-r1-distill-qwen-7b": "deepseek-r1-distill-qwen-7b",
+                }
+                
+                # Use mapping if available, otherwise use the extracted name
+                final_model_name = name_mappings.get(model_name, model_name)
+                
+                if final_model_name not in available_models:
+                    available_models[final_model_name] = []
+                
+                if precision not in available_models[final_model_name]:
+                    available_models[final_model_name].append(precision)
+        
+        # Sort models alphabetically and sort precisions by preference
+        sorted_models = {}
+        for model_name in sorted(available_models.keys()):
+            precision_order = ["int4", "int8", "fp16"]
+            sorted_precisions = [p for p in precision_order if p in available_models[model_name]]
+            sorted_models[model_name] = sorted_precisions
+            
+        return sorted_models
+    
+    except Exception as e:
+        print(f"Error fetching OpenVINO models: {e}")
+        # Fallback to a curated list of known working models based on the collection
+        return {
+            "deepseek-r1-distill-qwen-1.5b": ["int4", "int8", "fp16"],
+            "deepseek-r1-distill-qwen-7b": ["int4", "int8", "fp16"],
+            "deepseek-r1-distill-qwen-14b": ["int4", "int8", "fp16"],
+            "gemma-2-9b-it": ["int4", "int8", "fp16"],
+            "mistral-7b-instruct-v0.1": ["int4", "int8", "fp16"],
+            "neural-chat-7b-v3-3": ["int4", "int8", "fp16"],
+            "phi-3.5-mini-instruct": ["int4", "int8", "fp16"],
+            "phi-4-mini-instruct": ["int4", "int8", "fp16"],
+            "qwen2.5-0.5b-instruct": ["int4", "int8", "fp16"],
+            "qwen2.5-1.5b-instruct": ["int4", "int8", "fp16"],
+            "qwen2.5-3b-instruct": ["int4", "int8", "fp16"],
+            "qwen2.5-7b-instruct": ["int4", "int8", "fp16"],
+            "qwen2.5-14b-instruct": ["int4", "int8", "fp16"],
+            "tinyllama-1.1b-chat-v1.0": ["int4", "int8", "fp16"],
+        }
+
+def get_model_display_name(model_id):
+    """Convert model ID to a user-friendly display name"""
+    # Convert to title case and replace hyphens with spaces
+    display_name = model_id.replace("-", " ").title()
+    
+    # Handle specific model naming patterns
+    replacements = {
+        "Qwen2.5": "Qwen 2.5",
+        "Qwen2": "Qwen 2",
+        "Qwen3": "Qwen 3",
+        "Phi 3.5": "Phi-3.5",
+        "Phi 4": "Phi-4",
+        "Gemma 2": "Gemma-2",
+        "Tinyllama": "TinyLlama",
+        "Mistral 7b": "Mistral-7B",
+        "Neural Chat": "Neural-Chat",
+        "Deepseek R1": "DeepSeek-R1",
+        "V1.0": "v1.0",
+        "V0.1": "v0.1",
+        "It": "Instruct",
+        "3b": "3B",
+        "7b": "7B",
+        "9b": "9B",
+        "14b": "14B",
+        "1.5b": "1.5B",
+        "0.5b": "0.5B",
+    }
+    
+    for old, new in replacements.items():
+        display_name = display_name.replace(old, new)
+    
+    return display_name
+
 # Initialize Gradio interface
 with gr.Blocks(title="Telegram RAG System") as demo:
     gr.Markdown("# Telegram RAG System with OpenVINO")
@@ -467,25 +892,42 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         gr.Markdown("## Model Configuration")
         
         gr.Markdown("""
-        ℹ️ **Note:** Models need to be downloaded and converted using OpenVINO before they can be used. 
-        Please run the Jupyter notebook first to convert the models you want to use. 
-        Once converted, models should be placed in directories named after the model ID in the same folder as this script.
+        ℹ️ **Note:** This application automatically downloads optimized OpenVINO models from Hugging Face. 
+        LLM models are downloaded from the [OpenVINO LLM collection](https://huggingface.co/collections/OpenVINO/llm-6687aaa2abca3bbcec71a9bd), 
+        while embedding and reranking models are downloaded from individual [OpenVINO repositories](https://huggingface.co/OpenVINO).
+        All models are cached locally. If a preconverted model is not available, you can still run the Jupyter notebook to convert models manually.
         """)
+        
+        # Fetch available models
+        with gr.Row():
+            refresh_models_btn = gr.Button("🔄 Refresh Available Models", variant="secondary", size="sm")
+        
+        available_llm_models = get_available_openvino_llm_models()
         
         with gr.Row():
             with gr.Column():
-                # Language selection
+                # Language selection (keeping for embedding/rerank models)
                 language_dropdown = gr.Dropdown(
                     choices=list(SUPPORTED_LLM_MODELS.keys()),
                     value=DEFAULT_LANGUAGE,
-                    label="Language"
+                    label="Language (for embedding/rerank models)"
                 )
                 
-                # LLM model selection
+                # LLM model selection with display names
+                llm_choices = [(get_model_display_name(model_id), model_id) for model_id in available_llm_models.keys()]
                 llm_model_dropdown = gr.Dropdown(
-                    choices=list(SUPPORTED_LLM_MODELS[DEFAULT_LANGUAGE].keys()),
-                    value=DEFAULT_LLM_MODEL,
-                    label="LLM Model"
+                    choices=llm_choices,
+                    value=DEFAULT_LLM_MODEL if DEFAULT_LLM_MODEL in available_llm_models else (llm_choices[0][1] if llm_choices else None),
+                    label="LLM Model",
+                    allow_custom_value=False
+                )
+                
+                # Precision selection for LLM
+                llm_precision_dropdown = gr.Dropdown(
+                    choices=available_llm_models.get(DEFAULT_LLM_MODEL, ["int4"]),
+                    value="int4",
+                    label="LLM Precision",
+                    info="Higher precision = better quality, larger size"
                 )
             
             with gr.Column():
@@ -505,7 +947,7 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         
         # Device selection
         device_dropdown = gr.Dropdown(
-            choices=["CPU", "GPU", "AUTO"],
+            choices=get_available_devices(),
             value=DEFAULT_DEVICE,
             label="Device for Models"
         )
@@ -516,10 +958,12 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         # Display current model information
         model_info = gr.Markdown(f"""
         ### Current Models:
-        - LLM: {DEFAULT_LLM_MODEL} (INT4)
-        - Embedding: {DEFAULT_EMBEDDING_MODEL}
-        - Reranker: {DEFAULT_RERANK_MODEL}
+        - LLM: {get_model_display_name(DEFAULT_LLM_MODEL)} (INT4) - {'✅' if llm_model_dir and llm_model_dir.exists() else '⬬ Will download from HF'}
+        - Embedding: {DEFAULT_EMBEDDING_MODEL} (INT8) - {'✅' if embedding_model_dir and embedding_model_dir.exists() else '⬬ Will download from HF'}
+        - Reranker: {DEFAULT_RERANK_MODEL} (INT8) - {'✅' if rerank_model_dir and rerank_model_dir.exists() else '⬬ Will download from HF'}
         - Device: {DEFAULT_DEVICE}
+        
+        💡 Models are automatically downloaded from [OpenVINO's Hugging Face repositories](https://huggingface.co/OpenVINO)
         """)
         
         # Add a model availability checker
@@ -534,8 +978,12 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             unavailable_llms = []
             for language, models in SUPPORTED_LLM_MODELS.items():
                 for model_id in models.keys():
-                    model_path = Path(model_id) / "INT4_compressed_weights"
-                    if model_path.exists():
+                    # Check for OpenVINO preconverted models first
+                    ov_model_path = get_ov_model_path(model_id, "int4")
+                    legacy_model_path = Path(model_id) / "INT4_compressed_weights"
+                    
+                    if (ov_model_path.exists() and (ov_model_path / "openvino_model.xml").exists()) or \
+                       (legacy_model_path.exists() and (legacy_model_path / "openvino_model.xml").exists()):
                         available_llms.append(f"✅ {language}/{model_id}")
                     else:
                         unavailable_llms.append(f"❌ {language}/{model_id}")
@@ -545,8 +993,12 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             unavailable_embeddings = []
             for language, models in SUPPORTED_EMBEDDING_MODELS.items():
                 for model_id in models.keys():
-                    model_path = Path(model_id)
-                    if model_path.exists():
+                    # Check for OpenVINO preconverted models first
+                    ov_model_path = get_ov_model_path(model_id, "int8")
+                    legacy_model_path = Path(model_id)
+                    
+                    if (ov_model_path.exists() and (ov_model_path / "openvino_model.xml").exists()) or \
+                       (legacy_model_path.exists() and (legacy_model_path / "openvino_model.xml").exists()):
                         available_embeddings.append(f"✅ {language}/{model_id}")
                     else:
                         unavailable_embeddings.append(f"❌ {language}/{model_id}")
@@ -555,36 +1007,46 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             available_rerankers = []
             unavailable_rerankers = []
             for model_id in SUPPORTED_RERANK_MODELS.keys():
-                model_path = Path(model_id)
-                if model_path.exists():
+                # Check for OpenVINO preconverted models first
+                ov_model_path = get_ov_model_path(model_id, "int8")
+                legacy_model_path = Path(model_id)
+                
+                if (ov_model_path.exists() and (ov_model_path / "openvino_model.xml").exists()) or \
+                   (legacy_model_path.exists() and (legacy_model_path / "openvino_model.xml").exists()):
                     available_rerankers.append(f"✅ {model_id}")
                 else:
                     unavailable_rerankers.append(f"❌ {model_id}")
             
-            # Generate report
-            report = "### Model Availability Report\n\n"
+            # Format the results
+            result_md = "## Model Availability Status\n\n"
             
-            report += "#### Available LLMs:\n"
             if available_llms:
-                report += "\n".join(available_llms) + "\n\n"
-            else:
-                report += "_No LLM models found_\n\n"
+                result_md += "### ✅ Available LLM Models:\n"
+                result_md += "\n".join(available_llms) + "\n\n"
             
-            report += "#### Available Embedding Models:\n"
+            if unavailable_llms:
+                result_md += "### ❌ Unavailable LLM Models:\n"
+                result_md += "\n".join(unavailable_llms) + "\n\n"
+            
             if available_embeddings:
-                report += "\n".join(available_embeddings) + "\n\n"
-            else:
-                report += "_No embedding models found_\n\n"
+                result_md += "### ✅ Available Embedding Models:\n"
+                result_md += "\n".join(available_embeddings) + "\n\n"
             
-            report += "#### Available Reranker Models:\n"
+            if unavailable_embeddings:
+                result_md += "### ❌ Unavailable Embedding Models:\n"
+                result_md += "\n".join(unavailable_embeddings) + "\n\n"
+            
             if available_rerankers:
-                report += "\n".join(available_rerankers) + "\n\n"
-            else:
-                report += "_No reranker models found_\n\n"
+                result_md += "### ✅ Available Reranking Models:\n"
+                result_md += "\n".join(available_rerankers) + "\n\n"
             
-            report += "\n\n_Note: To use models that are not yet available, run the notebook to convert them first._"
+            if unavailable_rerankers:
+                result_md += "### ❌ Unavailable Reranking Models:\n"
+                result_md += "\n".join(unavailable_rerankers) + "\n\n"
             
-            return report
+            result_md += "\n💡 **Note**: Unavailable models will be automatically downloaded from OpenVINO's Hugging Face collection when selected."
+            
+            return result_md
         
         check_models_btn.click(
             fn=check_model_availability,
@@ -600,75 +1062,73 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             """Update embedding model choices based on selected language"""
             return gr.Dropdown(choices=list(SUPPORTED_EMBEDDING_MODELS[language].keys()))
         
-        def reload_models(language, llm_model, embedding_model, reranker_model, device):
+        def refresh_available_models():
+            """Refresh the list of available LLM models from OpenVINO collection"""
+            try:
+                available_models = get_available_openvino_llm_models()
+                llm_choices = [(get_model_display_name(model_id), model_id) for model_id in available_models.keys()]
+                return gr.Dropdown(choices=llm_choices), "✅ Models refreshed successfully"
+            except Exception as e:
+                return gr.Dropdown(), f"❌ Error refreshing models: {str(e)}"
+        
+        def update_precision_choices(selected_llm_model):
+            """Update available precision choices based on selected LLM model"""
+            available_models = get_available_openvino_llm_models()
+            if selected_llm_model in available_models:
+                precisions = available_models[selected_llm_model]
+                # Sort precisions by preference: int4, int8, fp16
+                precision_order = ["int4", "int8", "fp16"]
+                sorted_precisions = [p for p in precision_order if p in precisions]
+                return gr.Dropdown(choices=sorted_precisions, value=sorted_precisions[0] if sorted_precisions else "int4")
+            return gr.Dropdown(choices=["int4"], value="int4")
+        
+        def reload_models(language, llm_model, embedding_model, reranker_model, llm_precision, device):
             """Reload models with the selected configuration"""
-            global embedding, reranker, llm, embedding_model_dir, rerank_model_dir, llm_base_dir, llm_model_dir
+            global embedding, reranker, llm, embedding_model_dir, rerank_model_dir, llm_model_dir
             
             try:
-                # Update model paths
-                embedding_model_dir = Path(embedding_model)
-                rerank_model_dir = Path(reranker_model)
-                llm_base_dir = Path(llm_model)
-                llm_model_dir = llm_base_dir / "INT4_compressed_weights"
+                status_msg = f"🔄 Loading models on {device}...\n"
                 
-                # Check if models exist on disk
-                missing_models = []
-                if not embedding_model_dir.exists():
-                    missing_models.append(f"Embedding model: {embedding_model_dir}")
-                if not rerank_model_dir.exists():
-                    missing_models.append(f"Reranker model: {rerank_model_dir}")
-                if not llm_model_dir.exists():
-                    missing_models.append(f"LLM model: {llm_model_dir}")
+                # Update model paths using OpenVINO preconverted models
+                embedding_model_dir = download_ov_model_if_needed(embedding_model, "int8", "embedding") or Path(embedding_model)
+                rerank_model_dir = download_ov_model_if_needed(reranker_model, "int8", "rerank") or Path(reranker_model)
+                llm_model_dir = download_ov_model_if_needed(llm_model, llm_precision, "llm") or get_ov_model_path(llm_model, llm_precision)
                 
-                # Get model configurations
-                embedding_model_configuration = SUPPORTED_EMBEDDING_MODELS[language][embedding_model]
-                rerank_model_configuration = SUPPORTED_RERANK_MODELS[reranker_model]
-                llm_model_configuration = SUPPORTED_LLM_MODELS[language][llm_model]
+                status_msg += f"📁 Model paths updated\n"
                 
-                # Initialize models
+                # Initialize models with optimized configuration
                 initialize_models(device)
-                initialize_rag()
-                
-                # Prepare status messages
-                model_statuses = []
-                if embedding is not None:
-                    model_statuses.append("✅ Embedding model loaded successfully")
-                else:
-                    model_statuses.append("❌ Embedding model failed to load")
-                    
-                if reranker is not None:
-                    model_statuses.append("✅ Reranker model loaded successfully")
-                else:
-                    model_statuses.append("❌ Reranker model failed to load")
-                    
-                if llm is not None:
-                    model_statuses.append("✅ LLM loaded successfully")
-                else:
-                    model_statuses.append("❌ LLM failed to load")
                 
                 # Update model info display
                 model_info_text = f"""
                 ### Current Models:
-                - LLM: {llm_model} (INT4)
-                - Embedding: {embedding_model}
-                - Reranker: {reranker_model}
+                - LLM: {get_model_display_name(llm_model)} ({llm_precision.upper()}) - {'✅' if llm and llm_model_dir and llm_model_dir.exists() else '❌'}
+                - Embedding: {embedding_model} (INT8) - {'✅' if embedding and embedding_model_dir and embedding_model_dir.exists() else '❌'}
+                - Reranker: {reranker_model} (INT8) - {'✅' if reranker and rerank_model_dir and rerank_model_dir.exists() else '❌'}
                 - Device: {device}
                 
-                ### Status:
-                {chr(10).join(model_statuses)}
+                💡 Models with GPU memory optimization applied
                 """
                 
-                # Add warning if models are missing
-                status_message = f"Models reloaded successfully on {device} device"
-                if missing_models:
-                    warning_message = "Warning: The following models were not found on disk:\n" + "\n".join(missing_models)
-                    status_message = f"{status_message}\n\n{warning_message}\n\nSome functionality may be limited."
+                # Check if all models loaded successfully
+                models_loaded = 0
+                if embedding: models_loaded += 1
+                if reranker: models_loaded += 1
+                if llm: models_loaded += 1
                 
-                return status_message, model_info_text
+                if models_loaded == 3:
+                    status_msg += "✅ All models loaded successfully!"
+                elif models_loaded > 0:
+                    status_msg += f"⚠️ {models_loaded}/3 models loaded successfully. Some may have fallen back to CPU."
+                else:
+                    status_msg += "❌ Failed to load models. Check GPU memory and try CPU device."
+                
+                return model_info_text, status_msg
+                
             except Exception as e:
-                import traceback
-                error_msg = f"Error reloading models: {str(e)}\n{traceback.format_exc()}"
-                return error_msg, model_info.value
+                error_msg = f"❌ Error reloading models: {str(e)}\n"
+                error_msg += "💡 Try using CPU device or smaller models"
+                return "❌ Model loading failed", error_msg
         
         # Set up event handlers for dropdowns
         language_dropdown.change(
@@ -681,6 +1141,18 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             fn=update_embedding_choices,
             inputs=[language_dropdown],
             outputs=[embedding_model_dropdown]
+        )
+
+        llm_model_dropdown.change(
+            fn=update_precision_choices,
+            inputs=[llm_model_dropdown],
+            outputs=[llm_precision_dropdown]
+        )
+        
+        refresh_models_btn.click(
+            fn=refresh_available_models,
+            inputs=[],
+            outputs=[llm_model_dropdown, model_status]
         )
         
         # Add model parameter preview
@@ -728,6 +1200,7 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                 llm_model_dropdown, 
                 embedding_model_dropdown, 
                 reranker_model_dropdown, 
+                llm_precision_dropdown, 
                 device_dropdown
             ],
             outputs=[model_status, model_info]
@@ -864,39 +1337,156 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         outputs=qa_output
     )
 
+    # Add GPU diagnostics section
+    gr.Markdown("## GPU Diagnostics")
+    gpu_info_btn = gr.Button("🔍 Check GPU Memory & Devices", variant="secondary")
+    gpu_info_display = gr.Markdown("Click to check GPU information...")
+    
+    def check_gpu_info():
+        """Check GPU devices and memory information"""
+        import openvino as ov
+        
+        try:
+            core = ov.Core()
+            available_devices = core.available_devices
+            
+            info_lines = ["### GPU Information\n"]
+            
+            # Check for GPU devices
+            gpu_devices = [d for d in available_devices if d.startswith("GPU")]
+            if not gpu_devices:
+                info_lines.append("❌ **No GPU devices detected**")
+                info_lines.append("- Only CPU inference available")
+            else:
+                info_lines.append(f"✅ **Found {len(gpu_devices)} GPU device(s):**")
+                
+                for i, gpu in enumerate(gpu_devices):
+                    try:
+                        # Get detailed device information
+                        device_name = core.get_property(gpu, "FULL_DEVICE_NAME")
+                        
+                        # Identify GPU type
+                        if "Intel" in device_name or "UHD" in device_name or "Iris" in device_name:
+                            gpu_type = "🔵 Intel Integrated Graphics"
+                            recommendation = "Good for light workloads, embedding models"
+                        elif "NVIDIA" in device_name or "GeForce" in device_name or "RTX" in device_name:
+                            gpu_type = "🟢 NVIDIA Discrete GPU"
+                            recommendation = "Best for LLM inference, high performance"
+                        elif "AMD" in device_name or "Radeon" in device_name:
+                            gpu_type = "🔴 AMD GPU" 
+                            recommendation = "Good performance, may need specific drivers"
+                        else:
+                            gpu_type = "⚪ Unknown GPU Type"
+                            recommendation = "Performance may vary"
+                        
+                        info_lines.append(f"\n**{gpu} - {gpu_type}**")
+                        info_lines.append(f"  - Full Name: `{device_name}`")
+                        info_lines.append(f"  - Selection: `GPU.{i} ({gpu_type.split()[1]} {gpu_type.split()[2]})`")
+                        info_lines.append(f"  - Recommendation: {recommendation}")
+                        
+                    except Exception as e:
+                        info_lines.append(f"\n**{gpu}**")
+                        info_lines.append(f"  - Could not get detailed info: {e}")
+            
+            # Your specific GPU configuration
+            info_lines.append("\n### Your Hardware Configuration:")
+            info_lines.append("Based on your system info:")
+            info_lines.append("- **GPU.0**: Likely Intel Raptor Lake-S UHD Graphics (Integrated)")
+            info_lines.append("- **GPU.1**: Likely NVIDIA GeForce RTX 4070 Max-Q (Discrete)")
+            
+            # Device selection recommendations
+            info_lines.append("\n### Device Selection Recommendations:")
+            info_lines.append("🎯 **For Best Performance:**")
+            info_lines.append("  - **LLM**: Use `GPU.1 (NVIDIA)` or `AUTO`")
+            info_lines.append("  - **Embedding**: Use `CPU` or `GPU.0 (Intel Graphics)`") 
+            info_lines.append("  - **Reranking**: Use `CPU` or `GPU.0 (Intel Graphics)`")
+            
+            info_lines.append("\n⚡ **For Memory Safety:**")
+            info_lines.append("  - **All Models**: Use `CPU` (most reliable)")
+            info_lines.append("  - **Mixed**: LLM on GPU, others on CPU")
+            
+            # Memory optimization tips
+            info_lines.append("\n### Memory Optimization Tips:")
+            if gpu_devices:
+                info_lines.append("🎯 **For RTX 4070 Max-Q (8GB VRAM):**")
+                info_lines.append("  - ✅ Use INT4 models (smaller memory footprint)")
+                info_lines.append("  - ✅ DeepSeek-R1-Distill-Qwen-1.5B (current choice is optimal)")
+                info_lines.append("  - ⚠️ Avoid models larger than 3B parameters")
+                info_lines.append("  - 🔧 Use max_new_tokens ≤ 512 for GPU inference")
+                
+                info_lines.append("\n🔧 **Troubleshooting GPU Errors:**")
+                info_lines.append("  - Try `CPU` device if GPU fails")
+                info_lines.append("  - Use `AUTO` to let OpenVINO choose optimal device")
+                info_lines.append("  - Restart application if memory error occurs")
+                info_lines.append("  - Close other GPU applications (games, video editing)")
+            else:
+                info_lines.append("💡 Install GPU drivers to enable GPU acceleration")
+            
+            # Available devices summary
+            info_lines.append(f"\n### All Available OpenVINO Devices:")
+            for device in available_devices:
+                if device.startswith("GPU"):
+                    try:
+                        name = core.get_property(device, "FULL_DEVICE_NAME")
+                        info_lines.append(f"  - `{device}`: {name}")
+                    except:
+                        info_lines.append(f"  - `{device}`: (Details unavailable)")
+                else:
+                    info_lines.append(f"  - `{device}`")
+            
+            return "\n".join(info_lines)
+            
+        except Exception as e:
+            return f"❌ Error checking GPU info: {str(e)}"
+    
+    gpu_info_btn.click(
+        fn=check_gpu_info,
+        inputs=[],
+        outputs=[gpu_info_display]
+    )
+
 # Update the main function
 if __name__ == "__main__":
     import sys
     
-    # Check if models exist
+    print("\n🚀 Starting Telegram RAG Application with organized directory structure...")
+    
+    # Check if models exist in new location
     missing_models = []
-    if not embedding_model_dir.exists():
-        missing_models.append(f"Embedding model: {embedding_model_dir}")
-    if not rerank_model_dir.exists():
-        missing_models.append(f"Reranker model: {rerank_model_dir}")
-    if not llm_model_dir.exists():
-        missing_models.append(f"LLM model: {llm_model_dir}")
+    if not embedding_model_dir or not embedding_model_dir.exists():
+        missing_models.append(f"Embedding model: {DEFAULT_EMBEDDING_MODEL}")
+    if not rerank_model_dir or not rerank_model_dir.exists():
+        missing_models.append(f"Reranker model: {DEFAULT_RERANK_MODEL}")
+    if not llm_model_dir or not llm_model_dir.exists():
+        missing_models.append(f"LLM model: {DEFAULT_LLM_MODEL}")
     
     if missing_models:
-        print("WARNING: The following models are missing:")
+        print("INFO: The following models will be downloaded automatically when needed:")
         for model in missing_models:
             print(f"  - {model}")
-        print("\nPlease run the notebook to convert these models first.")
-        print("You can still run the app, but some functionality may be limited.")
+        print(f"\nModels will be downloaded to: {models_dir.absolute()}")
+        print("You can still run the application - models download on first use.")
     
-    # Check for Telegram API credentials
-    api_id = os.getenv("TELEGRAM_API_ID")
-    api_hash = os.getenv("TELEGRAM_API_HASH")
+    # Initialize models with default device
+    initialize_models(DEFAULT_DEVICE)
     
-    if not api_id or not api_hash:
-        print("WARNING: Telegram API credentials not found in .env file.")
-        print("You will not be able to download messages from Telegram.")
-        print("Please create a .env file with your TELEGRAM_API_ID and TELEGRAM_API_HASH.")
+    # Initialize RAG system if possible
+    if initialize_rag():
+        print("✅ RAG system ready")
+    else:
+        print("⚠️ RAG system not ready - will initialize when vector store is available")
     
-    # Launch the app
-    try:
-        demo.queue().launch(share=False)
-    except Exception as e:
-        print(f"Error launching Gradio app: {e}")
-        print("Trying with share=True...")
-        demo.queue().launch(share=True) 
+    print(f"\n📁 Directory Structure:")
+    print(f"  - Models: {models_dir.absolute()}")
+    print(f"  - Data: {data_dir.absolute()}")
+    print(f"  - Telegram Data: {telegram_data_dir.absolute()}")
+    print(f"  - Vector Store: {vector_store_path.absolute()}")
+    
+    # Create Gradio interface
+    demo = create_interface()
+    demo.queue().launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+        debug=False
+    ) 
