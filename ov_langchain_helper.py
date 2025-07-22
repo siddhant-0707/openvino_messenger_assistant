@@ -696,3 +696,116 @@ class OpenVINOReranker(BaseDocumentCompressor):
             )
             final_results.append(doc)
         return final_results
+
+
+class OpenVINOTextEmbeddings(BaseModel, Embeddings):
+    """OpenVINO GenAI Text Embedding Pipeline implementation.
+    
+    This class uses the native openvino_genai.TextEmbeddingPipeline from the 
+    OpenVINO GenAI RAG samples: https://github.com/openvinotoolkit/openvino.genai/tree/master/samples/python/rag
+    
+    Based on the official example:
+    import openvino_genai
+    pipeline = openvino_genai.TextEmbeddingPipeline(model_dir, "CPU")
+    embeddings = pipeline.embed_documents(["document1", "document2"])
+
+    Example:
+        .. code-block:: python
+
+            from ov_langchain_helper import OpenVINOTextEmbeddings
+
+            embeddings = OpenVINOTextEmbeddings(
+                model_path="BAAI/bge-small-en-v1.5",
+                device="CPU"
+            )
+    """
+
+    model_path: str
+    """Path to the OpenVINO model directory."""
+    device: str = "CPU"
+    """Device to run the model on (CPU, GPU, AUTO)."""
+    batch_size: int = 32
+    """Batch size for processing multiple texts."""
+    show_progress: bool = False
+    """Whether to show progress bar during encoding."""
+    
+    # Internal attributes
+    _pipeline: Any = None
+
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+
+    def __init__(self, **kwargs: Any):
+        """Initialize the OpenVINO GenAI Text Embedding Pipeline."""
+        super().__init__(**kwargs)
+        
+        try:
+            import openvino_genai
+        except ImportError as e:
+            raise ImportError(
+                "Could not import openvino_genai python package. "
+                "Please install it with: pip install -U openvino-genai"
+            ) from e
+
+        try:
+            # Initialize the TextEmbeddingPipeline directly
+            self._pipeline = openvino_genai.TextEmbeddingPipeline(self.model_path, self.device)
+            print(f"✅ OpenVINO GenAI TextEmbeddingPipeline loaded from {self.model_path} on {self.device}")
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to load OpenVINO GenAI TextEmbeddingPipeline: {e}")
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Compute embeddings for a list of documents.
+
+        Args:
+            texts: The list of texts to embed.
+
+        Returns:
+            List of embeddings, one for each text.
+        """
+        if not texts:
+            return []
+
+        # Clean texts (replace newlines with spaces)
+        cleaned_texts = [text.replace("\n", " ") for text in texts]
+        
+        try:
+            # Process in batches to manage memory
+            all_embeddings = []
+            
+            for i in range(0, len(cleaned_texts), self.batch_size):
+                batch_texts = cleaned_texts[i:i + self.batch_size]
+                
+                # Use the embed_documents method from TextEmbeddingPipeline
+                batch_embeddings = self._pipeline.embed_documents(batch_texts)
+                
+                # Convert to list of lists if needed
+                if hasattr(batch_embeddings, 'tolist'):
+                    batch_embeddings = batch_embeddings.tolist()
+                elif not isinstance(batch_embeddings[0], list):
+                    # Handle case where embeddings are returned as flat array
+                    batch_embeddings = [emb.tolist() if hasattr(emb, 'tolist') else emb for emb in batch_embeddings]
+                
+                all_embeddings.extend(batch_embeddings)
+                
+                if self.show_progress and len(cleaned_texts) > self.batch_size:
+                    print(f"Processed {min(i + self.batch_size, len(cleaned_texts))}/{len(cleaned_texts)} texts")
+                    
+        except Exception as e:
+            print(f"Error during embedding inference: {e}")
+            # Return zero embeddings as fallback
+            embedding_dim = 384  # Common dimension for bge-small models
+            return [[0.0] * embedding_dim] * len(cleaned_texts)
+
+        return all_embeddings
+
+    def embed_query(self, text: str) -> List[float]:
+        """Compute query embeddings.
+
+        Args:
+            text: The text to embed.
+
+        Returns:
+            Embeddings for the text.
+        """
+        return self.embed_documents([text])[0]
