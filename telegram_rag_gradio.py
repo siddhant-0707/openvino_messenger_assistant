@@ -49,7 +49,7 @@ vector_store_path.mkdir(exist_ok=True)
 
 # Default model selections
 DEFAULT_LANGUAGE = "English"
-DEFAULT_LLM_MODEL = "DeepSeek-R1-Distill-Qwen-1.5B"
+DEFAULT_LLM_MODEL = "DeepSeek-R1-Distill-Qwen-1.5B"  # Use exact name from llm_config.py
 DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 DEFAULT_RERANK_MODEL = "bge-reranker-v2-m3"
 DEFAULT_DEVICE = "AUTO"
@@ -62,13 +62,16 @@ llm_model_configuration = SUPPORTED_LLM_MODELS[DEFAULT_LANGUAGE][DEFAULT_LLM_MOD
 # Use OpenVINO preconverted model paths from Hugging Face
 def get_ov_model_path(model_name, precision="int4"):
     """Get the local path for OpenVINO preconverted models"""
-    return models_dir / f"{model_name}_{precision}_ov"
+    model_path_name = model_name.lower()
+    return models_dir / f"{model_path_name}_{precision}_ov"
 
 def download_ov_model_if_needed(model_name, precision="int4", model_type="llm"):
     """Download OpenVINO preconverted model from Hugging Face if not already present"""
     import huggingface_hub as hf_hub
     
-    model_dir = get_ov_model_path(model_name, precision)
+    # Convert model name to lowercase for file paths (consistent with Hugging Face repos)
+    model_path_name = model_name.lower()
+    model_dir = models_dir / f"{model_path_name}_{precision}_ov"
     
     if model_dir.exists() and (model_dir / "openvino_model.xml").exists():
         print(f"✅ OpenVINO {precision.upper()} {model_name} already exists at {model_dir}")
@@ -77,21 +80,21 @@ def download_ov_model_if_needed(model_name, precision="int4", model_type="llm"):
     # Construct OpenVINO model hub ID based on model type
     if model_type == "llm":
         # LLM models follow the pattern: OpenVINO/{model_name}-{precision}-ov
-        ov_model_hub_id = f"OpenVINO/{model_name}-{precision}-ov"
+        ov_model_hub_id = f"OpenVINO/{model_path_name}-{precision}-ov"
     elif model_type == "embedding":
         # Embedding models: OpenVINO/bge-base-en-v1.5-int8-ov
         if model_name == "bge-small-en-v1.5":
             ov_model_hub_id = "OpenVINO/bge-base-en-v1.5-int8-ov"
         else:
-            ov_model_hub_id = f"OpenVINO/{model_name}-{precision}-ov"
+            ov_model_hub_id = f"OpenVINO/{model_path_name}-{precision}-ov"
     elif model_type == "rerank":
         # Reranking models: OpenVINO/bge-reranker-base-int8-ov  
         if model_name == "bge-reranker-v2-m3":
             ov_model_hub_id = "OpenVINO/bge-reranker-base-int8-ov"
         else:
-            ov_model_hub_id = f"OpenVINO/{model_name}-{precision}-ov"
+            ov_model_hub_id = f"OpenVINO/{model_path_name}-{precision}-ov"
     else:
-        ov_model_hub_id = f"OpenVINO/{model_name}-{precision}-ov"
+        ov_model_hub_id = f"OpenVINO/{model_path_name}-{precision}-ov"
     
     try:
         print(f"📥 Downloading OpenVINO {precision.upper()} {model_name} from {ov_model_hub_id}...")
@@ -412,13 +415,33 @@ print(f"  - Data: {data_dir.absolute()}")
 print(f"  - Telegram Data: {telegram_data_dir.absolute()}")
 print(f"  - Vector Store: {vector_store_path.absolute()}")
 
-embedding_model_dir = download_ov_model_if_needed(DEFAULT_EMBEDDING_MODEL, "int8", "embedding") or get_ov_model_path(DEFAULT_EMBEDDING_MODEL, "int8")
-rerank_model_dir = download_ov_model_if_needed(DEFAULT_RERANK_MODEL, "int8", "rerank") or get_ov_model_path(DEFAULT_RERANK_MODEL, "int8")
-llm_model_dir = download_ov_model_if_needed(DEFAULT_LLM_MODEL, "int4", "llm") or get_ov_model_path(DEFAULT_LLM_MODEL, "int4")
+# Download/locate models with consistent paths
+print("\n🔄 Initializing models...")
+embedding_model_dir = download_ov_model_if_needed(DEFAULT_EMBEDDING_MODEL, "int8", "embedding")
+if not embedding_model_dir:
+    embedding_model_dir = get_ov_model_path(DEFAULT_EMBEDDING_MODEL, "int8")
+    print(f"📁 Embedding model path: {embedding_model_dir}")
+
+rerank_model_dir = download_ov_model_if_needed(DEFAULT_RERANK_MODEL, "int8", "rerank")
+if not rerank_model_dir:
+    rerank_model_dir = get_ov_model_path(DEFAULT_RERANK_MODEL, "int8")
+    print(f"📁 Reranker model path: {rerank_model_dir}")
+
+llm_model_dir = download_ov_model_if_needed(DEFAULT_LLM_MODEL, "int4", "llm")
+if not llm_model_dir:
+    llm_model_dir = get_ov_model_path(DEFAULT_LLM_MODEL, "int4")
+    print(f"📁 LLM model path: {llm_model_dir}")
 
 # Initialize models with default device
+print(f"\n⚙️ Loading models on {DEFAULT_DEVICE}...")
 initialize_models(DEFAULT_DEVICE)
-initialize_rag()
+
+# Initialize RAG system if possible
+print("\n🔗 Setting up RAG system...")
+if initialize_rag():
+    print("✅ RAG system ready")
+else:
+    print("⚠️ RAG system not ready - will initialize when vector store is available")
 
 def format_message(msg):
     """Format a message for display"""
@@ -484,7 +507,21 @@ def process_messages() -> str:
         if not telegram_data_dir.exists() or not any(telegram_data_dir.iterdir()):
             return "No message data found. Please download messages first."
         
-        rag.process_telegram_data_dir(data_dir=str(telegram_data_dir))
+        # Create RAG integration instance with current embedding model
+        if embedding is None:
+            return "Embedding model not loaded. Please check model configuration."
+            
+        rag_integration = TelegramRAGIntegration(
+            embedding_model=embedding,
+            vector_store_path=str(vector_store_path),
+            telegram_data_path=str(telegram_data_dir)
+        )
+        
+        rag_integration.process_telegram_data_dir()
+        
+        # Reinitialize RAG system with new vector store
+        initialize_rag()
+        
         return "Successfully processed messages into vector store"
     except Exception as e:
         import traceback
@@ -496,11 +533,28 @@ def query_messages(query: str, channel: str, num_results: int) -> str:
         if not vector_store_path.exists() or not any(vector_store_path.iterdir()):
             return "Vector store not found. Please process messages first."
         
-        filter_dict = {"channel": channel} if channel and channel.strip() else None
-        results = rag.query_messages(query, k=num_results, filter_dict=filter_dict)
+        if retriever is None:
+            return "RAG system not initialized. Please check if vector store exists and models are loaded."
+        
+        # Get relevant documents using the retriever
+        try:
+            results = retriever.get_relevant_documents(query)
+            # Limit results to requested number
+            results = results[:num_results]
+        except Exception as e:
+            return f"Error retrieving documents: {str(e)}"
+        
+        if not results:
+            return "No results found for your query."
         
         output = []
         for i, doc in enumerate(results, 1):
+            # Filter by channel if specified
+            if channel and channel.strip():
+                doc_channel = doc.metadata.get('channel', '').lower()
+                if channel.lower() not in doc_channel:
+                    continue
+            
             output.append(f"Result {i}:")
             output.append(f"Channel: {doc.metadata.get('channel', 'Unknown')}")
             output.append(f"Date: {doc.metadata.get('date', 'Unknown')}")
@@ -512,7 +566,7 @@ def query_messages(query: str, channel: str, num_results: int) -> str:
             output.append(f"Content: {content}")
             output.append("")
             
-        return "\n".join(output) if output else "No results found"
+        return "\n".join(output) if output else f"No results found for channel '{channel}'"
     except Exception as e:
         import traceback
         return f"Error querying messages: {str(e)}\n{traceback.format_exc()}"
@@ -530,46 +584,55 @@ def answer_question(
         if not vector_store_path.exists() or not any(vector_store_path.iterdir()):
             return "Vector store not found. Please process messages first."
         
-        if llm is None:
-            return "LLM not initialized. Please check model paths."
+        if rag_chain is None:
+            return "RAG system not initialized. Please check if models are loaded."
             
-        filter_dict = {"channel": channel} if channel and channel.strip() else None
+        # Update LLM configuration if LLM is available
+        if llm is not None:
+            llm.config.temperature = temperature
+            llm.config.repetition_penalty = repetition_penalty
         
-        # Update LLM configuration
-        llm.config.temperature = temperature
-        llm.config.top_p = 0.9
-        llm.config.top_k = 50
-        llm.config.repetition_penalty = repetition_penalty
-        
-        # Get answer from RAG
-        result = rag.answer_question(
-            question=question,
-            llm=llm,
-            k=num_context,
-            filter_dict=filter_dict,
-            show_retrieved=show_retrieved,
-            reranker=reranker
-        )
-        
-        # Format the response
-        if show_retrieved and isinstance(result, dict) and "context_docs" in result:
-            context_docs = []
-            for i, doc in enumerate(result["context_docs"], 1):
-                context_docs.append(f"Document {i}:")
-                context_docs.append(f"Channel: {doc.metadata.get('channel', 'Unknown')}")
-                context_docs.append(f"Date: {doc.metadata.get('date', 'Unknown')}")
+        # Get answer from RAG chain
+        try:
+            result = rag_chain({"query": question})
+            answer = result.get("result", "No answer generated")
+            source_docs = result.get("source_documents", [])
+            
+            # Filter by channel if specified
+            if channel and channel.strip() and source_docs:
+                filtered_docs = []
+                for doc in source_docs:
+                    doc_channel = doc.metadata.get('channel', '').lower()
+                    if channel.lower() in doc_channel:
+                        filtered_docs.append(doc)
+                source_docs = filtered_docs[:num_context]
+            else:
+                source_docs = source_docs[:num_context]
+            
+            # Format the response
+            if show_retrieved and source_docs:
+                context_docs = []
+                context_docs.append("\n--- Retrieved Context ---")
+                for i, doc in enumerate(source_docs, 1):
+                    context_docs.append(f"Document {i}:")
+                    context_docs.append(f"Channel: {doc.metadata.get('channel', 'Unknown')}")
+                    context_docs.append(f"Date: {doc.metadata.get('date', 'Unknown')}")
+                    
+                    # Show content snippet
+                    content = doc.page_content
+                    if len(content) > 200:
+                        content = content[:200] + "..."
+                    context_docs.append(f"Content: {content}")
+                    context_docs.append("")
+                    
+                context_str = "\n".join(context_docs)
+                return f"{answer}\n{context_str}"
+            else:
+                return answer
                 
-                # Show content snippet
-                content = doc.page_content
-                if len(content) > 200:
-                    content = content[:200] + "..."
-                context_docs.append(f"Content: {content}")
-                context_docs.append("")
-                
-            context_str = "\n".join(context_docs)
-            return f"{result['answer']}\n\n--- Retrieved Context ---\n{context_str}"
-        else:
-            return result if isinstance(result, str) else result.get("answer", "No answer generated")
+        except Exception as e:
+            return f"Error during RAG query: {str(e)}"
+            
     except Exception as e:
         import traceback
         return f"Error answering question: {str(e)}\n{traceback.format_exc()}"
@@ -603,22 +666,22 @@ def answer_question_stream(
         
         # Set up streaming for the LLM
         # First retrieve context documents from the vector store
-        retriever = rag.vectorstore.as_retriever(
-            search_kwargs={"k": num_context * 2 if reranker else num_context, "filter": filter_dict},
-            search_type="similarity"
-        )
+        if retriever is None:
+            return "RAG system not initialized. Please check if vector store exists and models are loaded."
         
-        # Add reranking if available
-        if reranker:
-            from langchain.retrievers import ContextualCompressionRetriever
-            reranker.top_n = num_context
-            retriever = ContextualCompressionRetriever(
-                base_compressor=reranker,
-                base_retriever=retriever
-            )
-        
-        # Get context documents
+        # Get context documents using the retriever
         context_docs = retriever.get_relevant_documents(question)
+        
+        # Filter by channel if specified
+        if channel and channel.strip():
+            filtered_docs = []
+            for doc in context_docs:
+                doc_channel = doc.metadata.get('channel', '').lower()
+                if channel.lower() in doc_channel:
+                    filtered_docs.append(doc)
+            context_docs = filtered_docs[:num_context]
+        else:
+            context_docs = context_docs[:num_context]
         
         progress(0.2, desc="Preparing prompt...")
         
@@ -1483,7 +1546,6 @@ if __name__ == "__main__":
     print(f"  - Vector Store: {vector_store_path.absolute()}")
     
     # Create Gradio interface
-    demo = create_interface()
     demo.queue().launch(
         server_name="0.0.0.0",
         server_port=7860,
