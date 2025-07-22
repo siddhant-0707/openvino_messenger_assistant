@@ -74,6 +74,58 @@ class TelegramRAGIntegration:
             print(f"Error loading vector store: {str(e)}")
             self.vectorstore = None
     
+    def process_telegram_data(self, json_file_path):
+        """Process a single Telegram JSON file and return documents"""
+        try:
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                messages = json.load(f)
+            
+            # Create documents from messages
+            documents = self._create_documents_from_messages(messages)
+            return documents
+            
+        except Exception as e:
+            print(f"Error processing {json_file_path}: {e}")
+            return []
+    
+    def create_vector_store(self, documents):
+        """Create or update the vector store with documents"""
+        try:
+            if not documents:
+                print("No documents to add to vector store")
+                return
+            
+            # Load existing vector store if it exists
+            if self.vector_store_path.exists() and any(self.vector_store_path.iterdir()):
+                try:
+                    self.vectorstore = FAISS.load_local(
+                        str(self.vector_store_path), 
+                        self.embedding, 
+                        allow_dangerous_deserialization=True
+                    )
+                    print(f"📚 Loaded existing vector store from {self.vector_store_path}")
+                    
+                    # Add new documents to existing store
+                    self.vectorstore.add_documents(documents)
+                    print(f"✅ Added {len(documents)} documents to existing vector store")
+                    
+                except Exception as e:
+                    print(f"Error loading existing vector store: {e}")
+                    print("Creating new vector store...")
+                    self.vectorstore = FAISS.from_documents(documents, self.embedding)
+            else:
+                # Create new vector store
+                self.vectorstore = FAISS.from_documents(documents, self.embedding)
+                print(f"✅ Created new vector store with {len(documents)} documents")
+            
+            # Save the vector store
+            self.vectorstore.save_local(str(self.vector_store_path))
+            print(f"💾 Vector store saved to {self.vector_store_path}")
+            
+        except Exception as e:
+            print(f"Error creating vector store: {e}")
+            raise e
+
     def process_telegram_data_dir(self, data_dir_path=None):
         """
         Process all JSON files in the telegram data directory
