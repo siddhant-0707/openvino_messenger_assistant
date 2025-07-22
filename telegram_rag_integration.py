@@ -18,7 +18,8 @@ class TelegramRAGIntegration:
         self, 
         embedding_model=None,
         embedding_model_name=None,
-        vector_store_path="telegram_vector_store",
+        vector_store_path=".data/telegram_vector_store",
+        telegram_data_path=".data/telegram_data",
         chunk_size=500,
         chunk_overlap=50
     ):
@@ -28,13 +29,19 @@ class TelegramRAGIntegration:
         Args:
             embedding_model: Pre-initialized embedding model instance
             embedding_model_name: Path to embedding model (alternative to embedding_model)
-            vector_store_path: Path to store vector embeddings
+            vector_store_path: Path to store vector embeddings (default: .data/telegram_vector_store)
+            telegram_data_path: Path to telegram data directory (default: .data/telegram_data)
             chunk_size: Size of text chunks for embedding
             chunk_overlap: Overlap between chunks
         """
-        self.vector_store_path = vector_store_path
+        self.vector_store_path = Path(vector_store_path)
+        self.telegram_data_path = Path(telegram_data_path)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        
+        # Ensure directories exist
+        self.vector_store_path.mkdir(parents=True, exist_ok=True)
+        self.telegram_data_path.mkdir(parents=True, exist_ok=True)
         
         # Initialize embedding model
         if embedding_model is not None:
@@ -67,37 +74,45 @@ class TelegramRAGIntegration:
             print(f"Error loading vector store: {str(e)}")
             self.vectorstore = None
     
-    def process_telegram_data_dir(self, data_dir="telegram_data"):
-        """Process all telegram data files in the directory"""
-        # Get all JSON files in the data directory
-        data_path = Path(data_dir)
-        json_files = list(data_path.glob("telegram_messages_*.json"))
+    def process_telegram_data_dir(self, data_dir_path=None):
+        """
+        Process all JSON files in the telegram data directory
         
-        if not json_files:
-            raise FileNotFoundError(f"No telegram message files found in {data_dir}")
+        Args:
+            data_dir_path: Optional custom path to telegram data directory
+        """
+        if data_dir_path is None:
+            data_dir_path = self.telegram_data_path
+        else:
+            data_dir_path = Path(data_dir_path)
             
-        # Process each file
-        all_documents = []
-        for json_file in json_files:
-            with open(json_file, "r", encoding="utf-8") as f:
-                messages = json.load(f)
-            
-            documents = self._create_documents_from_messages(messages)
-            all_documents.extend(documents)
-            
-        # Create or update vector store
-        if not all_documents:
-            print("No documents to process")
+        if not data_dir_path.exists():
+            print(f"❌ Telegram data directory not found: {data_dir_path}")
+            print("💡 Use telegram_ingestion.py to download messages first")
             return
             
-        if self.vectorstore is None:
-            self.vectorstore = FAISS.from_documents(all_documents, self.embedding)
-            self.vectorstore.save_local(self.vector_store_path)
-        else:
-            self.vectorstore.add_documents(all_documents)
-            self.vectorstore.save_local(self.vector_store_path)
+        json_files = list(data_dir_path.glob("*.json"))
+        if not json_files:
+            print(f"❌ No JSON files found in {data_dir_path}")
+            print("💡 Use telegram_ingestion.py to download messages first")
+            return
             
-        print(f"Processed {len(all_documents)} documents into vector store")
+        print(f"📂 Processing {len(json_files)} files from {data_dir_path}")
+        
+        all_documents = []
+        for json_file in json_files:
+            try:
+                documents = self.process_telegram_data(str(json_file))
+                all_documents.extend(documents)
+                print(f"✅ Processed {json_file.name}: {len(documents)} documents")
+            except Exception as e:
+                print(f"❌ Error processing {json_file.name}: {e}")
+        
+        if all_documents:
+            self.create_vector_store(all_documents)
+            print(f"🎉 Successfully processed {len(all_documents)} total documents")
+        else:
+            print("❌ No documents were processed successfully")
     
     def _create_documents_from_messages(self, messages):
         """Convert messages to documents for the vector store"""
