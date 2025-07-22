@@ -1,3 +1,20 @@
+## Setup and Installation
+
+1. **Create a Virtual Environment**
+   ```bash
+   python3 -m venv openvino_env
+   ```
+2. **Activate the Environment**
+   ```bash
+   source openvino_env/bin/activate
+   ```
+3. **Install the Packages**
+   ```bash
+   python -m pip install --upgrade pip
+   pip install wheel setuptools
+   pip install -r requirements.txt
+   ```
+
 ## Telegram Integration
 
 To use the Telegram integration functionality, follow these steps:
