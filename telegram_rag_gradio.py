@@ -9,7 +9,7 @@ from pathlib import Path
 import openvino as ov
 from openvino_tokenizers import convert_tokenizer
 from transformers import AutoTokenizer, AutoModel
-from ov_langchain_helper import OpenVINOLLM, OpenVINOBgeEmbeddings, OpenVINOReranker
+from ov_langchain_helper import OpenVINOLLM, OpenVINOBgeEmbeddings, OpenVINOReranker, OpenVINOTextEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.chains import RetrievalQA
@@ -53,6 +53,7 @@ DEFAULT_LLM_MODEL = "DeepSeek-R1-Distill-Qwen-1.5B"  # Use exact name from llm_c
 DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 DEFAULT_RERANK_MODEL = "bge-reranker-v2-m3"
 DEFAULT_DEVICE = "AUTO"
+DEFAULT_EMBEDDING_TYPE = "text_embedding_pipeline"  # "text_embedding_pipeline", "openvino_genai" or "legacy"
 
 # Get model configurations
 embedding_model_configuration = SUPPORTED_EMBEDDING_MODELS[DEFAULT_LANGUAGE][DEFAULT_EMBEDDING_MODEL]
@@ -218,7 +219,7 @@ def parse_device_name(device_selection):
     else:
         return device_selection
 
-def initialize_models(device="AUTO"):
+def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
     """Initialize all models with the specified device and optimized configuration"""
     global embedding, reranker, llm
     
@@ -226,36 +227,85 @@ def initialize_models(device="AUTO"):
     actual_device = parse_device_name(device)
     
     try:
-        # Initialize embedding model with simplified config
+        # Initialize embedding model with the selected type
         if embedding_model_dir and embedding_model_dir.exists():
             try:
-                # Simple device config for embedding models
-                embedding_config = {"device_name": actual_device}
-                
-                embedding = OpenVINOBgeEmbeddings(
-                    model_path=str(embedding_model_dir),
-                    model_kwargs=embedding_config,
-                    encode_kwargs={
-                        "mean_pooling": embedding_model_configuration["mean_pooling"],
-                        "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
-                        "batch_size": 2 if "GPU" in actual_device else 4,  # Reduce batch size for GPU
-                    }
-                )
-                print(f"✅ Embedding model loaded from {embedding_model_dir} on {device} ({actual_device})")
+                if embedding_type == "text_embedding_pipeline":
+                    # Use the TextEmbeddingPipeline approach from OpenVINO GenAI RAG samples
+                    print(f"🔄 Loading TextEmbeddingPipeline...")
+                    embedding = OpenVINOTextEmbeddings(
+                        model_path=str(embedding_model_dir),
+                        device=actual_device,
+                        batch_size=2 if "GPU" in actual_device else 4,  # Reduce batch size for GPU
+                        show_progress=False,
+                    )
+                    print(f"✅ TextEmbeddingPipeline loaded from {embedding_model_dir} on {device} ({actual_device})")
+                    
+                elif embedding_type == "openvino_genai":
+                    # Use the legacy BGE implementation for now
+                    print(f"🔄 Loading OpenVINO BGE embedding model...")
+                    embedding = OpenVINOBgeEmbeddings(
+                        model_path=str(embedding_model_dir),
+                        device=actual_device,
+                        model_kwargs={"device_name": actual_device},
+                        encode_kwargs={
+                            "mean_pooling": embedding_model_configuration["mean_pooling"],
+                            "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
+                            "batch_size": 2 if "GPU" in actual_device else 4,  # Reduce batch size for GPU
+                        }
+                    )
+                    print(f"✅ OpenVINO BGE embedding model loaded from {embedding_model_dir} on {device} ({actual_device})")
+                else:
+                    # Use the legacy implementation
+                    print(f"🔄 Loading legacy OpenVINO embedding model...")
+                    embedding_config = {"device_name": actual_device}
+                    
+                    embedding = OpenVINOBgeEmbeddings(
+                        model_path=str(embedding_model_dir),
+                        model_kwargs=embedding_config,
+                        encode_kwargs={
+                            "mean_pooling": embedding_model_configuration["mean_pooling"],
+                            "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
+                            "batch_size": 2 if "GPU" in actual_device else 4,  # Reduce batch size for GPU
+                        }
+                    )
+                    print(f"✅ Legacy embedding model loaded from {embedding_model_dir} on {device} ({actual_device})")
+                    
             except Exception as e:
                 print(f"❌ Error loading embedding model on {device} ({actual_device}): {e}")
                 if actual_device != "CPU":
                     print("🔄 Falling back to CPU for embedding model...")
-                    embedding = OpenVINOBgeEmbeddings(
-                        model_path=str(embedding_model_dir),
-                        model_kwargs={"device_name": "CPU"},
-                        encode_kwargs={
-                            "mean_pooling": embedding_model_configuration["mean_pooling"],
-                            "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
-                            "batch_size": 4,
-                        }
-                    )
-                    print(f"✅ Embedding model loaded on CPU (fallback)")
+                    try:
+                        if embedding_type == "text_embedding_pipeline":
+                            embedding = OpenVINOTextEmbeddings(
+                                model_path=str(embedding_model_dir),
+                                device="CPU",
+                                batch_size=4,
+                            )
+                        elif embedding_type == "openvino_genai":
+                            embedding = OpenVINOBgeEmbeddings(
+                                model_path=str(embedding_model_dir),
+                                model_kwargs={"device_name": "CPU"},
+                                encode_kwargs={
+                                    "mean_pooling": embedding_model_configuration["mean_pooling"],
+                                    "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
+                                    "batch_size": 4,
+                                }
+                            )
+                        else:
+                            embedding = OpenVINOBgeEmbeddings(
+                                model_path=str(embedding_model_dir),
+                                model_kwargs={"device_name": "CPU"},
+                                encode_kwargs={
+                                    "mean_pooling": embedding_model_configuration["mean_pooling"],
+                                    "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
+                                    "batch_size": 4,
+                                }
+                            )
+                        print(f"✅ Embedding model loaded on CPU (fallback)")
+                    except Exception as fallback_error:
+                        print(f"❌ CPU fallback also failed: {fallback_error}")
+                        embedding = None
                 else:
                     embedding = None
         else:
@@ -357,7 +407,7 @@ def initialize_models(device="AUTO"):
         print("🔄 Falling back to CPU for all models...")
         # Fallback to CPU for all models
         if actual_device != "CPU":
-            initialize_models("CPU")
+            initialize_models("CPU", embedding_type)
 
 def initialize_rag():
     """Initialize RAG system"""
@@ -432,9 +482,9 @@ if not llm_model_dir:
     llm_model_dir = get_ov_model_path(DEFAULT_LLM_MODEL, "int4")
     print(f"📁 LLM model path: {llm_model_dir}")
 
-# Initialize models with default device
-print(f"\n⚙️ Loading models on {DEFAULT_DEVICE}...")
-initialize_models(DEFAULT_DEVICE)
+# Initialize models with default device and TextEmbeddingPipeline
+print(f"\n⚙️ Loading models on {DEFAULT_DEVICE} with {DEFAULT_EMBEDDING_TYPE}...")
+initialize_models(DEFAULT_DEVICE, DEFAULT_EMBEDDING_TYPE)
 
 # Initialize RAG system if possible
 print("\n🔗 Setting up RAG system...")
@@ -955,10 +1005,23 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         gr.Markdown("## Model Configuration")
         
         gr.Markdown("""
-        ℹ️ **Note:** This application automatically downloads optimized OpenVINO models from Hugging Face. 
+        ℹ️ **TextEmbeddingPipeline Integration:** This application now uses the native `openvino_genai.TextEmbeddingPipeline` from the [official OpenVINO GenAI RAG samples](https://github.com/openvinotoolkit/openvino.genai/tree/master/samples/python/rag). 
+        
+        **Key Features:**
+        - **Native TextEmbeddingPipeline**: Direct integration with `openvino_genai.TextEmbeddingPipeline(model_dir, device)`
+        - **Official RAG Sample Approach**: Based on the exact implementation from OpenVINO GenAI RAG samples
+        - **Multiple Implementation Options**: Choose between TextEmbeddingPipeline, OpenVINO GenAI, or Legacy approaches
+        
+        **Usage Example from Official Samples:**
+        ```python
+        import openvino_genai
+        pipeline = openvino_genai.TextEmbeddingPipeline(model_dir, "CPU")
+        embeddings = pipeline.embed_documents(["document1", "document2"])
+        ```
+        
         LLM models are downloaded from the [OpenVINO LLM collection](https://huggingface.co/collections/OpenVINO/llm-6687aaa2abca3bbcec71a9bd), 
         while embedding and reranking models are downloaded from individual [OpenVINO repositories](https://huggingface.co/OpenVINO).
-        All models are cached locally. If a preconverted model is not available, you can still run the Jupyter notebook to convert models manually.
+        All models are cached locally in the `.models` directory.
         """)
         
         # Fetch available models
@@ -1013,6 +1076,18 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             choices=get_available_devices(),
             value=DEFAULT_DEVICE,
             label="Device for Models"
+        )
+        
+        # Embedding implementation selection
+        embedding_type_dropdown = gr.Dropdown(
+            choices=[
+                ("TextEmbeddingPipeline (Latest)", "text_embedding_pipeline"),
+                ("OpenVINO GenAI", "openvino_genai"),
+                ("Legacy OpenVINO", "legacy")
+            ],
+            value=DEFAULT_EMBEDDING_TYPE,
+            label="Embedding Implementation",
+            info="TextEmbeddingPipeline uses the official OpenVINO GenAI RAG samples approach"
         )
         
         reload_btn = gr.Button("Reload Models with Selected Configuration")
@@ -1145,7 +1220,7 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                 return gr.Dropdown(choices=sorted_precisions, value=sorted_precisions[0] if sorted_precisions else "int4")
             return gr.Dropdown(choices=["int4"], value="int4")
         
-        def reload_models(language, llm_model, embedding_model, reranker_model, llm_precision, device):
+        def reload_models(language, llm_model, embedding_model, reranker_model, llm_precision, device, embedding_type):
             """Reload models with the selected configuration"""
             global embedding, reranker, llm, embedding_model_dir, rerank_model_dir, llm_model_dir
             
@@ -1160,17 +1235,23 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                 status_msg += f"📁 Model paths updated\n"
                 
                 # Initialize models with optimized configuration
-                initialize_models(device)
+                initialize_models(device, embedding_type)
                 
                 # Update model info display
+                embedding_impl_display = {
+                    "text_embedding_pipeline": "TextEmbeddingPipeline",
+                    "openvino_genai": "OpenVINO GenAI",
+                    "legacy": "Legacy OpenVINO"
+                }.get(embedding_type, embedding_type)
+                
                 model_info_text = f"""
                 ### Current Models:
                 - LLM: {get_model_display_name(llm_model)} ({llm_precision.upper()}) - {'✅' if llm and llm_model_dir and llm_model_dir.exists() else '❌'}
-                - Embedding: {embedding_model} (INT8) - {'✅' if embedding and embedding_model_dir and embedding_model_dir.exists() else '❌'}
+                - Embedding: {embedding_model} (INT8, {embedding_impl_display}) - {'✅' if embedding and embedding_model_dir and embedding_model_dir.exists() else '❌'}
                 - Reranker: {reranker_model} (INT8) - {'✅' if reranker and rerank_model_dir and rerank_model_dir.exists() else '❌'}
                 - Device: {device}
                 
-                💡 Models with GPU memory optimization applied
+                💡 Using {embedding_impl_display} for text embeddings
                 """
                 
                 # Check if all models loaded successfully
@@ -1264,7 +1345,8 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                 embedding_model_dropdown, 
                 reranker_model_dropdown, 
                 llm_precision_dropdown, 
-                device_dropdown
+                device_dropdown,
+                embedding_type_dropdown
             ],
             outputs=[model_status, model_info]
         )
