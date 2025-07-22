@@ -134,6 +134,7 @@ class OpenVINOLLM(LLM):
     ) -> Iterator[GenerationChunk]:
         """Output OpenVINO's generation Stream"""
         from threading import Event, Thread
+        import time
 
         if stop is not None:
             self.config.stop_strings = set(stop)
@@ -149,25 +150,69 @@ class OpenVINOLLM(LLM):
             attention_mask = tokens["attention_mask"]
             prompt = openvino_genai.TokenizedInputs(ov.Tensor(input_ids), ov.Tensor(attention_mask))
         stream_complete = Event()
+        generation_error = None
 
         def generate_and_signal_complete() -> None:
             """
-            genration function for single thread
+            Generation function for single thread with error handling
             """
-            self.streamer.reset()
-            self.ov_pipe.generate(prompt, self.config, self.streamer, **kwargs)
-            stream_complete.set()
-            self.streamer.end()
+            nonlocal generation_error
+            try:
+                self.streamer.reset()
+                self.ov_pipe.generate(prompt, self.config, self.streamer, **kwargs)
+                stream_complete.set()
+                self.streamer.end()
+            except Exception as e:
+                generation_error = e
+                stream_complete.set()
+                self.streamer.end()
 
         t1 = Thread(target=generate_and_signal_complete)
         t1.start()
 
-        for char in self.streamer:
-            chunk = GenerationChunk(text=char)
-            if run_manager:
-                run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+        # Wait for generation to start or fail
+        start_time = time.time()
+        timeout = 30  # 30 second timeout
+        
+        try:
+            for char in self.streamer:
+                # Check if generation thread encountered an error
+                if generation_error is not None:
+                    # Check if it's a GPU memory error
+                    if "CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST" in str(generation_error) or \
+                       "OpenCL" in str(generation_error) or \
+                       "GPU" in str(generation_error):
+                        raise RuntimeError(
+                            f"GPU memory error detected: {generation_error}\n"
+                            # "Suggested solutions:\n"
+                            # "  - Switch to CPU device\n"
+                            # "  - Use a smaller model (1.5B instead of 3B+)\n"
+                            # "  - Reduce max_new_tokens to 256 or less\n"
+                            # "  - Close other applications using GPU\n"
+                            # "  - Restart the application"
+                        )
+                    else:
+                        raise generation_error
+                
+                # Check timeout
+                if time.time() - start_time > timeout:
+                    raise TimeoutError("Generation timed out after 30 seconds")
+                
+                chunk = GenerationChunk(text=char)
+                if run_manager:
+                    run_manager.on_llm_new_token(chunk.text, chunk=chunk)
 
-            yield chunk
+                yield chunk
+                
+        except Exception as e:
+            # Clean up the thread
+            if t1.is_alive():
+                stream_complete.set()
+                t1.join(timeout=5)
+            raise e
+        
+        # Wait for thread to complete
+        t1.join()
 
     @property
     def _identifying_params(self) -> Dict[str, Any]:
