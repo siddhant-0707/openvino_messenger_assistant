@@ -466,13 +466,51 @@ with gr.Blocks(title="Telegram RAG System") as demo:
     with gr.Tab("Models & Configuration"):
         gr.Markdown("## Model Configuration")
         
+        gr.Markdown("""
+        ℹ️ **Note:** Models need to be downloaded and converted using OpenVINO before they can be used. 
+        Please run the Jupyter notebook first to convert the models you want to use. 
+        Once converted, models should be placed in directories named after the model ID in the same folder as this script.
+        """)
+        
+        with gr.Row():
+            with gr.Column():
+                # Language selection
+                language_dropdown = gr.Dropdown(
+                    choices=list(SUPPORTED_LLM_MODELS.keys()),
+                    value=DEFAULT_LANGUAGE,
+                    label="Language"
+                )
+                
+                # LLM model selection
+                llm_model_dropdown = gr.Dropdown(
+                    choices=list(SUPPORTED_LLM_MODELS[DEFAULT_LANGUAGE].keys()),
+                    value=DEFAULT_LLM_MODEL,
+                    label="LLM Model"
+                )
+            
+            with gr.Column():
+                # Embedding model selection
+                embedding_model_dropdown = gr.Dropdown(
+                    choices=list(SUPPORTED_EMBEDDING_MODELS[DEFAULT_LANGUAGE].keys()),
+                    value=DEFAULT_EMBEDDING_MODEL,
+                    label="Embedding Model"
+                )
+                
+                # Reranker model selection
+                reranker_model_dropdown = gr.Dropdown(
+                    choices=list(SUPPORTED_RERANK_MODELS.keys()),
+                    value=DEFAULT_RERANK_MODEL,
+                    label="Reranker Model"
+                )
+        
+        # Device selection
         device_dropdown = gr.Dropdown(
             choices=["CPU", "GPU", "AUTO"],
             value=DEFAULT_DEVICE,
             label="Device for Models"
         )
         
-        reload_btn = gr.Button("Reload Models with Selected Device")
+        reload_btn = gr.Button("Reload Models with Selected Configuration")
         model_status = gr.Textbox(label="Model Status", value="Models loaded with default settings")
         
         # Display current model information
@@ -484,19 +522,215 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         - Device: {DEFAULT_DEVICE}
         """)
         
-        def reload_models(device):
+        # Add a model availability checker
+        gr.Markdown("## Check Model Availability")
+        check_models_btn = gr.Button("Check Which Models Are Already Converted")
+        models_availability = gr.Markdown("Click the button to check model availability...")
+        
+        def check_model_availability():
+            """Check which models are available on disk"""
+            # Check LLMs
+            available_llms = []
+            unavailable_llms = []
+            for language, models in SUPPORTED_LLM_MODELS.items():
+                for model_id in models.keys():
+                    model_path = Path(model_id) / "INT4_compressed_weights"
+                    if model_path.exists():
+                        available_llms.append(f"✅ {language}/{model_id}")
+                    else:
+                        unavailable_llms.append(f"❌ {language}/{model_id}")
+            
+            # Check embeddings
+            available_embeddings = []
+            unavailable_embeddings = []
+            for language, models in SUPPORTED_EMBEDDING_MODELS.items():
+                for model_id in models.keys():
+                    model_path = Path(model_id)
+                    if model_path.exists():
+                        available_embeddings.append(f"✅ {language}/{model_id}")
+                    else:
+                        unavailable_embeddings.append(f"❌ {language}/{model_id}")
+            
+            # Check rerankers
+            available_rerankers = []
+            unavailable_rerankers = []
+            for model_id in SUPPORTED_RERANK_MODELS.keys():
+                model_path = Path(model_id)
+                if model_path.exists():
+                    available_rerankers.append(f"✅ {model_id}")
+                else:
+                    unavailable_rerankers.append(f"❌ {model_id}")
+            
+            # Generate report
+            report = "### Model Availability Report\n\n"
+            
+            report += "#### Available LLMs:\n"
+            if available_llms:
+                report += "\n".join(available_llms) + "\n\n"
+            else:
+                report += "_No LLM models found_\n\n"
+            
+            report += "#### Available Embedding Models:\n"
+            if available_embeddings:
+                report += "\n".join(available_embeddings) + "\n\n"
+            else:
+                report += "_No embedding models found_\n\n"
+            
+            report += "#### Available Reranker Models:\n"
+            if available_rerankers:
+                report += "\n".join(available_rerankers) + "\n\n"
+            else:
+                report += "_No reranker models found_\n\n"
+            
+            report += "\n\n_Note: To use models that are not yet available, run the notebook to convert them first._"
+            
+            return report
+        
+        check_models_btn.click(
+            fn=check_model_availability,
+            inputs=[],
+            outputs=[models_availability]
+        )
+        
+        def update_llm_choices(language):
+            """Update LLM model choices based on selected language"""
+            return gr.Dropdown(choices=list(SUPPORTED_LLM_MODELS[language].keys()))
+        
+        def update_embedding_choices(language):
+            """Update embedding model choices based on selected language"""
+            return gr.Dropdown(choices=list(SUPPORTED_EMBEDDING_MODELS[language].keys()))
+        
+        def reload_models(language, llm_model, embedding_model, reranker_model, device):
+            """Reload models with the selected configuration"""
+            global embedding, reranker, llm, embedding_model_dir, rerank_model_dir, llm_base_dir, llm_model_dir
+            
             try:
+                # Update model paths
+                embedding_model_dir = Path(embedding_model)
+                rerank_model_dir = Path(reranker_model)
+                llm_base_dir = Path(llm_model)
+                llm_model_dir = llm_base_dir / "INT4_compressed_weights"
+                
+                # Check if models exist on disk
+                missing_models = []
+                if not embedding_model_dir.exists():
+                    missing_models.append(f"Embedding model: {embedding_model_dir}")
+                if not rerank_model_dir.exists():
+                    missing_models.append(f"Reranker model: {rerank_model_dir}")
+                if not llm_model_dir.exists():
+                    missing_models.append(f"LLM model: {llm_model_dir}")
+                
+                # Get model configurations
+                embedding_model_configuration = SUPPORTED_EMBEDDING_MODELS[language][embedding_model]
+                rerank_model_configuration = SUPPORTED_RERANK_MODELS[reranker_model]
+                llm_model_configuration = SUPPORTED_LLM_MODELS[language][llm_model]
+                
+                # Initialize models
                 initialize_models(device)
                 initialize_rag()
-                return f"Models reloaded successfully on {device} device"
+                
+                # Prepare status messages
+                model_statuses = []
+                if embedding is not None:
+                    model_statuses.append("✅ Embedding model loaded successfully")
+                else:
+                    model_statuses.append("❌ Embedding model failed to load")
+                    
+                if reranker is not None:
+                    model_statuses.append("✅ Reranker model loaded successfully")
+                else:
+                    model_statuses.append("❌ Reranker model failed to load")
+                    
+                if llm is not None:
+                    model_statuses.append("✅ LLM loaded successfully")
+                else:
+                    model_statuses.append("❌ LLM failed to load")
+                
+                # Update model info display
+                model_info_text = f"""
+                ### Current Models:
+                - LLM: {llm_model} (INT4)
+                - Embedding: {embedding_model}
+                - Reranker: {reranker_model}
+                - Device: {device}
+                
+                ### Status:
+                {chr(10).join(model_statuses)}
+                """
+                
+                # Add warning if models are missing
+                status_message = f"Models reloaded successfully on {device} device"
+                if missing_models:
+                    warning_message = "Warning: The following models were not found on disk:\n" + "\n".join(missing_models)
+                    status_message = f"{status_message}\n\n{warning_message}\n\nSome functionality may be limited."
+                
+                return status_message, model_info_text
             except Exception as e:
                 import traceback
-                return f"Error reloading models: {str(e)}\n{traceback.format_exc()}"
+                error_msg = f"Error reloading models: {str(e)}\n{traceback.format_exc()}"
+                return error_msg, model_info.value
+        
+        # Set up event handlers for dropdowns
+        language_dropdown.change(
+            fn=update_llm_choices,
+            inputs=[language_dropdown],
+            outputs=[llm_model_dropdown]
+        )
+        
+        language_dropdown.change(
+            fn=update_embedding_choices,
+            inputs=[language_dropdown],
+            outputs=[embedding_model_dropdown]
+        )
+        
+        # Add model parameter preview
+        model_params_preview = gr.Markdown("Select models to see parameters...")
+        
+        def show_model_parameters(language, llm_model, embedding_model, reranker_model):
+            """Display parameters of the selected models"""
+            try:
+                preview = "### Model Parameters\n\n"
+                
+                # LLM parameters
+                llm_config = SUPPORTED_LLM_MODELS[language][llm_model]
+                preview += "#### LLM Parameters:\n"
+                preview += f"- Model ID: `{llm_config.get('model_id', 'N/A')}`\n"
+                preview += f"- Remote Code: `{llm_config.get('remote_code', False)}`\n"
+                
+                # Embedding parameters
+                embedding_config = SUPPORTED_EMBEDDING_MODELS[language][embedding_model]
+                preview += "\n#### Embedding Parameters:\n"
+                preview += f"- Model ID: `{embedding_config.get('model_id', 'N/A')}`\n"
+                preview += f"- Mean Pooling: `{embedding_config.get('mean_pooling', False)}`\n"
+                preview += f"- Normalize Embeddings: `{embedding_config.get('normalize_embeddings', True)}`\n"
+                
+                # Reranker parameters
+                reranker_config = SUPPORTED_RERANK_MODELS[reranker_model]
+                preview += "\n#### Reranker Parameters:\n"
+                preview += f"- Model ID: `{reranker_config.get('model_id', 'N/A')}`\n"
+                
+                return preview
+            except Exception as e:
+                return f"Error retrieving model parameters: {str(e)}"
+        
+        # Update model parameters when selections change
+        for dropdown in [language_dropdown, llm_model_dropdown, embedding_model_dropdown, reranker_model_dropdown]:
+            dropdown.change(
+                fn=show_model_parameters,
+                inputs=[language_dropdown, llm_model_dropdown, embedding_model_dropdown, reranker_model_dropdown],
+                outputs=[model_params_preview]
+            )
         
         reload_btn.click(
             fn=reload_models,
-            inputs=[device_dropdown],
-            outputs=[model_status]
+            inputs=[
+                language_dropdown, 
+                llm_model_dropdown, 
+                embedding_model_dropdown, 
+                reranker_model_dropdown, 
+                device_dropdown
+            ],
+            outputs=[model_status, model_info]
         )
     
     with gr.Tab("Download Messages"):
