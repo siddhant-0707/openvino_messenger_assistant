@@ -10,7 +10,7 @@ import openvino as ov
 from openvino_tokenizers import convert_tokenizer
 from transformers import AutoTokenizer, AutoModel
 from ov_langchain_helper import OpenVINOLLM, OpenVINOBgeEmbeddings, OpenVINOReranker, OpenVINOTextEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.chains import RetrievalQA
 import json
@@ -588,7 +588,7 @@ def query_messages(query: str, channel: str, num_results: int) -> str:
         
         # Get relevant documents using the retriever
         try:
-            results = retriever.get_relevant_documents(query)
+            results = retriever.invoke(query)
             # Limit results to requested number
             results = results[:num_results]
         except Exception as e:
@@ -720,7 +720,7 @@ def answer_question_stream(
             return "RAG system not initialized. Please check if vector store exists and models are loaded."
         
         # Get context documents using the retriever
-        context_docs = retriever.get_relevant_documents(question)
+        context_docs = retriever.invoke(question)
         
         # Filter by channel if specified
         if channel and channel.strip():
