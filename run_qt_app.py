@@ -8,10 +8,16 @@ Simple launcher script for the Qt for Python interface.
 
 import sys
 import os
+from pathlib import Path
 
 def main():
     """Launch the Qt application"""
     try:
+        # Add src directory to Python path for imports
+        project_root = Path(__file__).parent
+        src_path = project_root / "src"
+        sys.path.insert(0, str(src_path))
+        
         # Import and run the Qt application
         from telegram_rag_qt import main as qt_main
         qt_main()
@@ -19,6 +25,7 @@ def main():
         print(f"Error importing Qt application: {e}")
         print("Please ensure PySide6 is installed:")
         print("pip install PySide6")
+        print("Also ensure all source files are in the src/ directory")
         sys.exit(1)
     except Exception as e:
         print(f"Error starting application: {e}")

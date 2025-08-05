@@ -1,0 +1,45 @@
+# MANIFEST.in - Specifies additional files to include in the distribution
+
+# Include documentation
+include README.md
+include LICENSE
+include CHANGELOG.md
+
+# Include requirements files
+include requirements.txt
+include requirements_gradio.txt
+include requirements_telegram.txt
+
+# Include configuration files
+include .env.example
+recursive-include docs *
+
+# Include example notebooks
+include *.ipynb
+
+# Exclude development and cache files
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude *.so
+global-exclude .DS_Store
+global-exclude .git*
+global-exclude .pytest_cache
+global-exclude .mypy_cache
+
+# Exclude data directories (users should create their own)
+prune .models
+prune .data
+prune telegram_data
+prune telegram_vector_store
+
+# Exclude IDE files
+global-exclude .vscode
+global-exclude .idea
+global-exclude *.swp
+global-exclude *.swo
+
+# Include package data
+recursive-include telegram_rag_openvino *.py
+recursive-include telegram_rag_openvino *.json
+recursive-include telegram_rag_openvino *.yaml
+recursive-include telegram_rag_openvino *.yml 
