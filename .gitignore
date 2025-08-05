@@ -47,9 +47,7 @@ ENV/
 
 # Models and data directories (not committed)
 .models/
-.data/
-telegram_data/
-telegram_vector_store/
+data/
 
 # Old model directories (legacy)
 *.ov/
@@ -63,4 +61,5 @@ telegram_vector_store/
 .DS_Store
 Thumbs.db 
 
+# Session files
 *.session
