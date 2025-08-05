@@ -2266,7 +2266,7 @@ def main():
     
     # Set application metadata
     app.setApplicationName("Telegram RAG System")
-    app.setApplicationVersion("2.0.0")
+    app.setApplicationVersion("1.0.0")
     app.setOrganizationName("TelegramRAG")
     
     # Set application icon if available
