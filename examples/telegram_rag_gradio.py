@@ -1335,20 +1335,29 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                 current_device = device_dropdown.value
                 print(f"Refreshing models for device: {current_device}")
                 
-                # Get models based on current device
-                available_models = get_available_openvino_llm_models(device=current_device)
+                # DIRECT APPROACH: Force show NPU models if device contains "NPU" string
+                if "NPU" in current_device:
+                    print("NPU device detected - using direct NPU model list")
+                    
+                    # Directly get NPU models from npu_models.py
+                    from src.npu_models import get_npu_models
+                    npu_models = get_npu_models("llm")
+                    
+                    # Create model choices directly from NPU model list
+                    llm_choices = [(model["display_name"], model["repo_id"]) for model in npu_models]
+                    
+                    print(f"DIRECT NPU MODELS: Found {len(llm_choices)} models")
+                    for name, repo_id in llm_choices:
+                        print(f" - {name}: {repo_id}")
+                    
+                    status_msg = f"✅ NPU-optimized models loaded ({len(llm_choices)} models)"
+                    return gr.Dropdown(choices=llm_choices), status_msg
                 
-                # Create model choices list with proper display names
+                # Regular flow for non-NPU devices
+                available_models = get_available_openvino_llm_models(device=current_device)
                 llm_choices = [(get_model_display_name(model_id), model_id) for model_id in available_models.keys()]
                 
-                # If using NPU, make this clear in the status message
-                status_msg = "✅ Models refreshed successfully"
-                if is_npu_device(current_device):
-                    status_msg = f"✅ NPU-optimized models loaded successfully ({len(llm_choices)} models)"
-                    # Print found models for debugging
-                    print(f"Available NPU models: {[choice[0] for choice in llm_choices]}")
-                
-                return gr.Dropdown(choices=llm_choices), status_msg
+                return gr.Dropdown(choices=llm_choices), "✅ Models refreshed successfully"
             except Exception as e:
                 import traceback
                 print(f"Error refreshing models: {e}\n{traceback.format_exc()}")
