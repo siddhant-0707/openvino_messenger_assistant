@@ -154,11 +154,29 @@ def add_npu_models_to_config():
     Adds NPU-optimized models to the LLM config
     """
     try:
-        from src.llm_config import SUPPORTED_LLM_MODELS
+        # Import at runtime to avoid circular imports
+        import sys
+        import importlib
+        if 'src.llm_config' in sys.modules:
+            # Force reload to ensure we have the latest version
+            llm_config = importlib.reload(sys.modules['src.llm_config'])
+        else:
+            # First time import
+            import src.llm_config as llm_config
+        
+        # Print debug info
+        print(f"Adding NPU models to config. Available languages: {list(llm_config.SUPPORTED_LLM_MODELS.keys())}")
         
         # Add NPU models to English language models
-        for model in get_npu_models("llm"):
-            SUPPORTED_LLM_MODELS["English"][model["repo_id"]] = {
+        npu_models = get_npu_models("llm")
+        print(f"Found {len(npu_models)} NPU models to add to config")
+        
+        for model in npu_models:
+            # Make sure English key exists
+            if "English" not in llm_config.SUPPORTED_LLM_MODELS:
+                llm_config.SUPPORTED_LLM_MODELS["English"] = {}
+                
+            llm_config.SUPPORTED_LLM_MODELS["English"][model["repo_id"]] = {
                 "display_name": model["display_name"],
                 "description": model["description"],
                 "max_new_tokens": model["max_new_tokens"],
@@ -167,10 +185,13 @@ def add_npu_models_to_config():
                 "temperature": model["temperature"],
                 "npu_optimized": True  # Flag to identify NPU-optimized models
             }
+            print(f"Added NPU model to config: {model['repo_id']}")
             
         return True
     except Exception as e:
         print(f"Error adding NPU models to config: {e}")
+        import traceback
+        print(traceback.format_exc())
         return False
 
 def get_npu_model_path(model_info, models_dir=None):

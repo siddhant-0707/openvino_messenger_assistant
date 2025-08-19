@@ -972,8 +972,10 @@ def get_available_openvino_llm_models(device=DEFAULT_DEVICE):
         npu_models = get_npu_models("llm")
         if npu_models:
             print(f"Found {len(npu_models)} NPU-optimized models")
-            # Return repo IDs of NPU models
-            return [model["repo_id"] for model in npu_models]
+            # Return dictionary of repo_id: model_info
+            npu_model_dict = {model["repo_id"]: model for model in npu_models}
+            print(f"NPU model dict: {list(npu_model_dict.keys())}")
+            return npu_model_dict
     
     # If not NPU or no NPU models found, use regular collection
     try:
@@ -1431,6 +1433,31 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         # Update available models when device changes to show NPU models when NPU is selected
         def update_llm_models_for_device(device):
             """Update LLM model choices based on selected device"""
+            print(f"Device changed to: {device}")
+            
+            # Check if this is an NPU device
+            if "NPU" in device:
+                print("NPU device detected, fetching NPU-optimized models...")
+                
+                # Directly use NPU models list 
+                npu_models = get_npu_models("llm")
+                model_ids = [model["repo_id"] for model in npu_models]
+                
+                # Ensure NPU models are added to configuration
+                add_npu_models_to_config()
+                
+                # Create display names
+                llm_choices = [(model["display_name"], model["repo_id"]) for model in npu_models]
+                
+                print(f"Found {len(llm_choices)} NPU-optimized models")
+                for name, id in llm_choices:
+                    print(f" - {name} ({id})")
+                    
+                # If we found NPU models, return them
+                if llm_choices:
+                    return gr.Dropdown(choices=llm_choices)
+            
+            # Otherwise get regular models
             available_models = get_available_openvino_llm_models(device=device)
             llm_choices = [(get_model_display_name(model_id), model_id) for model_id in available_models]
             return gr.Dropdown(choices=llm_choices)
