@@ -22,6 +22,13 @@ from langchain.retrievers import ContextualCompressionRetriever
 from langchain.chains import RetrievalQA
 import json
 from datetime import datetime
+
+# Import NPU models integration
+from npu_models import (
+    get_npu_models, is_npu_device, download_npu_model, 
+    add_npu_models_to_config, get_npu_model_path, is_npu_compatible_model
+)
+
 from llm_config import (
     SUPPORTED_EMBEDDING_MODELS,
     SUPPORTED_RERANK_MODELS,
@@ -257,8 +264,18 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
     """Initialize all models with the specified device and optimized configuration"""
     global embedding, reranker, llm
     
+    # Check if we're using NPU
+    using_npu = is_npu_device(device)
+    if using_npu:
+        print("🔍 Using NPU-optimized models where available")
+        # Update model list with NPU models
+        add_npu_models_to_config()
+    
     # Parse the device selection to get actual OpenVINO device ID
     actual_device = parse_device_name(device)
+    
+    # For NPU devices, set batch size to 1 for best compatibility
+    batch_size = 1 if using_npu else (2 if "GPU" in actual_device else 4)
     
     try:
         # Initialize embedding model with the selected type
@@ -942,10 +959,23 @@ def download_and_convert_model(model_name: str = "BAAI/bge-small-en-v1.5"):
     print("Warning: Using deprecated function. Models should be converted using optimum-cli.")
     return DEFAULT_EMBEDDING_MODEL
 
-def get_available_openvino_llm_models():
+def get_available_openvino_llm_models(device=DEFAULT_DEVICE):
     """Fetch available LLM models from OpenVINO Hugging Face collection"""
     import huggingface_hub as hf_hub
     
+    # If using NPU, prioritize NPU-optimized models
+    if is_npu_device(device):
+        # Add NPU models to configuration
+        add_npu_models_to_config()
+        
+        # Get NPU-optimized models
+        npu_models = get_npu_models("llm")
+        if npu_models:
+            print(f"Found {len(npu_models)} NPU-optimized models")
+            # Return repo IDs of NPU models
+            return [model["repo_id"] for model in npu_models]
+    
+    # If not NPU or no NPU models found, use regular collection
     try:
         # Get models from the OpenVINO LLM collection
         collection_models = hf_hub.get_collection("OpenVINO/llm-6687aaa2abca3bbcec71a9bd")
@@ -1038,6 +1068,17 @@ def get_available_openvino_llm_models():
 
 def get_model_display_name(model_id):
     """Convert model ID to a user-friendly display name"""
+    # Check if this is an NPU-optimized model from our list
+    npu_models = get_npu_models("llm")
+    for model in npu_models:
+        if model["repo_id"] == model_id:
+            return model["display_name"]
+    
+    # For models in our configuration
+    for lang in SUPPORTED_LLM_MODELS:
+        if model_id in SUPPORTED_LLM_MODELS[lang] and "display_name" in SUPPORTED_LLM_MODELS[lang][model_id]:
+            return SUPPORTED_LLM_MODELS[lang][model_id]["display_name"]
+    
     # Convert to title case and replace hyphens with spaces
     display_name = model_id.replace("-", " ").title()
     
@@ -1100,7 +1141,19 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         with gr.Row():
             refresh_models_btn = gr.Button("🔄 Refresh Available Models", variant="secondary", size="sm")
         
-        available_llm_models = get_available_openvino_llm_models()
+        # Get initial model list (will be updated when device changes)
+        initial_device = device_dropdown.value if "device_dropdown" in locals() else DEFAULT_DEVICE
+        available_llm_models = get_available_openvino_llm_models(device=initial_device)
+        
+        gr.Markdown("""
+        ### 🖥️ NPU Support
+        
+        When using Neural Processing Unit (NPU), the application will automatically show 
+        NPU-optimized models from the [OpenVINO NPU collection](https://huggingface.co/collections/OpenVINO/llms-optimized-for-npu-686e7f0bf7bc184bd71f8ba0).
+        These models are specially quantized and optimized for Intel NPU hardware.
+        
+        If you have an NPU, select "NPU (Neural Compute)" from the device dropdown to see NPU-optimized models.
+        """)
         
         with gr.Row():
             with gr.Column():
@@ -1147,7 +1200,8 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         device_dropdown = gr.Dropdown(
             choices=get_available_devices(),
             value=DEFAULT_DEVICE,
-            label="Device for Models"
+            label="Device for Models",
+            info="Select 'NPU (Neural Compute)' if you have an Intel NPU for specialized models"
         )
         
         # Embedding implementation selection
@@ -1299,10 +1353,37 @@ with gr.Blocks(title="Telegram RAG System") as demo:
             try:
                 status_msg = f"🔄 Loading models on {device}...\n"
                 
-                # Update model paths using OpenVINO preconverted models
+                # Check if this is an NPU device and the model is NPU-optimized
+                if is_npu_device(device) and is_npu_compatible_model(llm_model):
+                    status_msg += f"🛠️ Using NPU-optimized model: {llm_model}\n"
+                    
+                    # Find the NPU model info
+                    npu_models = get_npu_models("llm")
+                    npu_model_info = None
+                    
+                    for model in npu_models:
+                        if model["repo_id"] == llm_model:
+                            npu_model_info = model
+                            break
+                    
+                    if npu_model_info:
+                        # Download NPU-optimized model
+                        llm_model_dir = get_npu_model_path(npu_model_info, models_dir)
+                        if llm_model_dir is None:
+                            status_msg += f"❌ Could not download NPU model for {llm_model}. Falling back.\n"
+                            # Fall back to standard model
+                            llm_model_dir = download_ov_model_if_needed(llm_model, llm_precision, "llm") or get_ov_model_path(llm_model, llm_precision)
+                    else:
+                        # Fall back to standard model
+                        llm_model_dir = download_ov_model_if_needed(llm_model, llm_precision, "llm") or get_ov_model_path(llm_model, llm_precision)
+                else:
+                    # Standard model flow
+                    # Update model paths using OpenVINO preconverted models
+                    llm_model_dir = download_ov_model_if_needed(llm_model, llm_precision, "llm") or get_ov_model_path(llm_model, llm_precision)
+                
+                # Always use standard flow for embedding and reranking models (no NPU versions yet)
                 embedding_model_dir = download_ov_model_if_needed(embedding_model, "int8", "embedding") or Path(embedding_model)
                 rerank_model_dir = download_ov_model_if_needed(reranker_model, "int8", "rerank") or Path(reranker_model)
-                llm_model_dir = download_ov_model_if_needed(llm_model, llm_precision, "llm") or get_ov_model_path(llm_model, llm_precision)
                 
                 status_msg += f"📁 Model paths updated\n"
                 
@@ -1347,6 +1428,19 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                 return "❌ Model loading failed", error_msg
         
         # Set up event handlers for dropdowns
+        # Update available models when device changes to show NPU models when NPU is selected
+        def update_llm_models_for_device(device):
+            """Update LLM model choices based on selected device"""
+            available_models = get_available_openvino_llm_models(device=device)
+            llm_choices = [(get_model_display_name(model_id), model_id) for model_id in available_models]
+            return gr.Dropdown(choices=llm_choices)
+        
+        device_dropdown.change(
+            fn=update_llm_models_for_device,
+            inputs=[device_dropdown],
+            outputs=[llm_model_dropdown]
+        )
+        
         language_dropdown.change(
             fn=update_llm_choices,
             inputs=[language_dropdown],
