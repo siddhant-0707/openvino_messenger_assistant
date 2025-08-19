@@ -145,20 +145,32 @@ def get_available_devices():
         core = ov.Core()
         available_devices = core.available_devices
         
+        # Print diagnostic info
+        print(f"Available OpenVINO devices detected: {available_devices}")
+        
         # Create detailed device options with descriptive names
         device_options = ["CPU", "AUTO"]
         
+        # Check specifically for NPU
+        has_npu = "NPU" in available_devices or "VPUX" in available_devices
+        if has_npu:
+            device_options.append("NPU (Neural Compute)")
+            print("NPU device detected and added to options list")
+        
         gpu_count = 0
+        intel_gpu_found = False
         for device in available_devices:
             if device.startswith("GPU"):
                 gpu_count += 1
                 try:
                     # Try to get device properties for more info
                     device_name = core.get_property(device, "FULL_DEVICE_NAME")
+                    print(f"GPU device found: {device_name}")
                     
                     # Create descriptive names based on known patterns
-                    if "Intel" in device_name or "UHD" in device_name or "Iris" in device_name:
+                    if "Intel" in device_name or "UHD" in device_name or "Iris" in device_name or "Arc" in device_name:
                         descriptive_name = f"GPU.{gpu_count-1} (Intel Graphics)"
+                        intel_gpu_found = True
                     elif "NVIDIA" in device_name or "GeForce" in device_name or "RTX" in device_name:
                         descriptive_name = f"GPU.{gpu_count-1} (NVIDIA)"
                     elif "AMD" in device_name or "Radeon" in device_name:
@@ -170,19 +182,25 @@ def get_available_devices():
                     
                     device_options.append(descriptive_name)
                     
-                except Exception:
+                except Exception as e:
+                    print(f"Error getting GPU properties: {e}")
                     # Fallback if we can't get device properties
                     if gpu_count == 1:
                         device_options.append(f"GPU.0 (Primary)")
                     else:
                         device_options.append(f"GPU.{gpu_count-1} (Secondary)")
         
-        # Add generic GPU option if multiple GPUs exist
-        if gpu_count > 1:
-            device_options.append("GPU (Auto-select)")
+        # Only add Intel GPU option if we found an Intel GPU
+        # This helps avoid duplicate generic GPU entries
+        if intel_gpu_found:
+            # Don't add a generic GPU option when we already have Intel GPU listed
+            pass
         elif gpu_count == 1:
             device_options.append("GPU (Generic)")
+        elif gpu_count > 1:
+            device_options.append("GPU (Auto-select)")
         
+        print(f"Final device options: {device_options}")
         return device_options
     
     except Exception as e:
