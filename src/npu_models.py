@@ -94,7 +94,23 @@ def get_npu_models(model_type="llm"):
 
 def is_npu_device(device):
     """Check if the specified device is an NPU"""
-    return device == "NPU" or "NPU" in device
+    # Add extra debug output
+    print(f"is_npu_device called with: '{device}' (type: {type(device)})")
+    
+    # Robust check for NPU - handle various scenarios
+    if not isinstance(device, str):
+        print("  Device is not a string!")
+        return False
+    
+    # Check for NPU in device string (case insensitive)
+    has_npu = "NPU" in device.upper()
+    # Also check for NEURAL as a fallback
+    has_neural = "NEURAL" in device.upper()
+    
+    result = has_npu or has_neural
+    print(f"  Contains 'NPU': {has_npu}, Contains 'NEURAL': {has_neural}, Result: {result}")
+    
+    return result
 
 def download_npu_model(model_info, models_dir=None):
     """

@@ -1178,13 +1178,18 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                     elem_id="regular_llm_dropdown"
                 )
                 
+                # Create a visible notification for NPU mode
+                npu_status = gr.Markdown("**[NPU MODE ACTIVATED - SELECT AN NPU MODEL BELOW]**", visible=False)
+                
                 # NPU-specific model selection (initially hidden)
                 npu_models = get_npu_models("llm")
                 npu_llm_choices = [(model["display_name"], model["repo_id"]) for model in npu_models]
+                print(f"Initializing NPU dropdown with {len(npu_llm_choices)} models: {[c[0] for c in npu_llm_choices]}")
+                
                 npu_model_dropdown = gr.Dropdown(
                     choices=npu_llm_choices,
                     value=npu_llm_choices[0][1] if npu_llm_choices else None,
-                    label="NPU-Optimized LLM Models",
+                    label="⚡ NPU-Optimized Models ⚡",
                     allow_custom_value=False,
                     visible=False,
                     elem_id="npu_llm_dropdown"
@@ -1474,24 +1479,38 @@ with gr.Blocks(title="Telegram RAG System") as demo:
         # Function to toggle between regular and NPU model dropdowns
         def toggle_model_dropdowns(device):
             """Toggle visibility of regular and NPU model dropdowns based on device selection"""
-            print(f"Device changed to: {device}")
+            print(f"Toggle function called with device: '{device}'")
             
-            # Check if this is an NPU device
-            is_npu = "NPU" in device
+            # Explicit debug output
+            print(f"Device type: {type(device)}")
+            print(f"Device contains 'NPU': {'NPU' in str(device)}")
+            print(f"Device equals 'NPU': {device == 'NPU'}")
+            print(f"Device equals 'NPU (Neural Compute)': {device == 'NPU (Neural Compute)'}")
             
-            if is_npu:
-                print("NPU device selected - showing NPU models dropdown")
-                # Show NPU dropdown, hide regular dropdown
-                return gr.update(visible=False), gr.update(visible=True)
+            # Explicit and robust check for NPU
+            is_npu_device = False
+            if isinstance(device, str) and ("NPU" in device.upper() or "NEURAL" in device.upper()):
+                is_npu_device = True
+                print("NPU DEVICE DETECTED! Showing NPU dropdown.")
+                
+            if is_npu_device:
+                # Force update model list immediately
+                npu_models = get_npu_models("llm")
+                print(f"Found {len(npu_models)} NPU models:")
+                for m in npu_models:
+                    print(f" - {m['display_name']}")
+                
+                # Show NPU dropdown and status, hide regular dropdown
+                return gr.update(visible=False), gr.update(visible=True), gr.update(visible=True)
             else:
                 print("Non-NPU device selected - showing regular models dropdown")
-                # Show regular dropdown, hide NPU dropdown
-                return gr.update(visible=True), gr.update(visible=False)
+                # Show regular dropdown, hide NPU dropdown and status
+                return gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)
         
         device_dropdown.change(
             fn=toggle_model_dropdowns,
             inputs=[device_dropdown],
-            outputs=[llm_model_dropdown, npu_model_dropdown]
+            outputs=[llm_model_dropdown, npu_model_dropdown, npu_status]
         )
         
         language_dropdown.change(
