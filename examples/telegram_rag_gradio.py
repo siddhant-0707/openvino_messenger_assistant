@@ -1166,13 +1166,28 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                     label="Language (for embedding/rerank models)"
                 )
                 
-                # LLM model selection with display names
-                llm_choices = [(get_model_display_name(model_id), model_id) for model_id in available_llm_models.keys()]
+                # Create two separate model selection dropdowns - one for regular models, one for NPU
+                # Regular LLM model selection
+                regular_llm_choices = [(get_model_display_name(model_id), model_id) for model_id in available_llm_models.keys()]
                 llm_model_dropdown = gr.Dropdown(
-                    choices=llm_choices,
-                    value=DEFAULT_LLM_MODEL if DEFAULT_LLM_MODEL in available_llm_models else (llm_choices[0][1] if llm_choices else None),
+                    choices=regular_llm_choices,
+                    value=DEFAULT_LLM_MODEL if DEFAULT_LLM_MODEL in available_llm_models else (regular_llm_choices[0][1] if regular_llm_choices else None),
                     label="LLM Model",
-                    allow_custom_value=False
+                    allow_custom_value=False,
+                    visible=True,
+                    elem_id="regular_llm_dropdown"
+                )
+                
+                # NPU-specific model selection (initially hidden)
+                npu_models = get_npu_models("llm")
+                npu_llm_choices = [(model["display_name"], model["repo_id"]) for model in npu_models]
+                npu_model_dropdown = gr.Dropdown(
+                    choices=npu_llm_choices,
+                    value=npu_llm_choices[0][1] if npu_llm_choices else None,
+                    label="NPU-Optimized LLM Models",
+                    allow_custom_value=False,
+                    visible=False,
+                    elem_id="npu_llm_dropdown"
                 )
                 
                 # Precision selection for LLM
@@ -1456,42 +1471,27 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                 return "❌ Model loading failed", error_msg
         
         # Set up event handlers for dropdowns
-        # Update available models when device changes to show NPU models when NPU is selected
-        def update_llm_models_for_device(device):
-            """Update LLM model choices based on selected device"""
+        # Function to toggle between regular and NPU model dropdowns
+        def toggle_model_dropdowns(device):
+            """Toggle visibility of regular and NPU model dropdowns based on device selection"""
             print(f"Device changed to: {device}")
             
             # Check if this is an NPU device
-            if "NPU" in device:
-                print("NPU device detected, fetching NPU-optimized models...")
-                
-                # Directly use NPU models list 
-                npu_models = get_npu_models("llm")
-                model_ids = [model["repo_id"] for model in npu_models]
-                
-                # Ensure NPU models are added to configuration
-                add_npu_models_to_config()
-                
-                # Create display names
-                llm_choices = [(model["display_name"], model["repo_id"]) for model in npu_models]
-                
-                print(f"Found {len(llm_choices)} NPU-optimized models")
-                for name, id in llm_choices:
-                    print(f" - {name} ({id})")
-                    
-                # If we found NPU models, return them
-                if llm_choices:
-                    return gr.Dropdown(choices=llm_choices)
+            is_npu = "NPU" in device
             
-            # Otherwise get regular models
-            available_models = get_available_openvino_llm_models(device=device)
-            llm_choices = [(get_model_display_name(model_id), model_id) for model_id in available_models]
-            return gr.Dropdown(choices=llm_choices)
+            if is_npu:
+                print("NPU device selected - showing NPU models dropdown")
+                # Show NPU dropdown, hide regular dropdown
+                return gr.update(visible=False), gr.update(visible=True)
+            else:
+                print("Non-NPU device selected - showing regular models dropdown")
+                # Show regular dropdown, hide NPU dropdown
+                return gr.update(visible=True), gr.update(visible=False)
         
         device_dropdown.change(
-            fn=update_llm_models_for_device,
+            fn=toggle_model_dropdowns,
             inputs=[device_dropdown],
-            outputs=[llm_model_dropdown]
+            outputs=[llm_model_dropdown, npu_model_dropdown]
         )
         
         language_dropdown.change(
@@ -1556,11 +1556,31 @@ with gr.Blocks(title="Telegram RAG System") as demo:
                 outputs=[model_params_preview]
             )
         
+        # Helper function to handle model selection based on which dropdown is visible
+        def get_selected_model(regular_model, npu_model, device):
+            """Select the appropriate model based on device and visibility"""
+            if "NPU" in device:
+                print(f"Using NPU model: {npu_model}")
+                return npu_model
+            else:
+                print(f"Using regular model: {regular_model}")
+                return regular_model
+                
         reload_btn.click(
-            fn=reload_models,
+            fn=lambda lang, reg_model, npu_model, emb_model, rerank_model, precision, device, emb_type: 
+                reload_models(
+                    lang, 
+                    get_selected_model(reg_model, npu_model, device), 
+                    emb_model, 
+                    rerank_model, 
+                    precision, 
+                    device, 
+                    emb_type
+                ),
             inputs=[
                 language_dropdown, 
                 llm_model_dropdown, 
+                npu_model_dropdown,  # Add the NPU model dropdown
                 embedding_model_dropdown, 
                 reranker_model_dropdown, 
                 llm_precision_dropdown, 
