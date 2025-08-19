@@ -234,12 +234,19 @@ def get_optimized_device_config(device="AUTO"):
 
 def parse_device_name(device_selection):
     """Parse the user-friendly device name to get the actual OpenVINO device ID"""
+    # Print diagnostic info
+    print(f"Parsing device name: {device_selection}")
+    
     if device_selection in ["CPU", "AUTO"]:
         return device_selection
     elif device_selection.startswith("GPU."):
         # Extract GPU number from "GPU.0 (Intel Graphics)" -> "GPU.0"
         gpu_id = device_selection.split(" ")[0]  # "GPU.0"
         return gpu_id
+    elif "NPU" in device_selection:
+        # Return the standard NPU device name (not the display name)
+        print("NPU device selected, using 'NPU' as device ID")
+        return "NPU"
     elif "GPU" in device_selection:
         # Generic GPU selection
         return "GPU"
