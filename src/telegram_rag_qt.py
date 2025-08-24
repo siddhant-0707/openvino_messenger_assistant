@@ -386,9 +386,13 @@ class ModelConfigPanel(QWidget):
         self.gpu_diagnostics_btn = QPushButton("🔍 GPU Diagnostics")
         self.gpu_diagnostics_btn.clicked.connect(self.show_gpu_diagnostics)
         
+        self.npu_diagnostics_btn = QPushButton("⚡ NPU Diagnostics")
+        self.npu_diagnostics_btn.clicked.connect(self.show_npu_diagnostics)
+        
         buttons_layout.addWidget(self.refresh_models_btn)
         buttons_layout.addWidget(self.reload_models_btn)
         buttons_layout.addWidget(self.gpu_diagnostics_btn)
+        buttons_layout.addWidget(self.npu_diagnostics_btn)
         
         # Model status display
         self.model_status_text = QTextEdit()
@@ -511,6 +515,72 @@ class ModelConfigPanel(QWidget):
         gpu_text = QTextBrowser()
         gpu_text.setMarkdown(gpu_info)
         layout.addWidget(gpu_text)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+        
+        dialog.exec()
+    
+    def show_npu_diagnostics(self):
+        """Show NPU diagnostics dialog"""
+        from pathlib import Path
+        info_lines = ["### NPU Diagnostics\n"]
+        try:
+            import openvino as ov
+            core = ov.Core()
+            devices = core.available_devices
+            info_lines.append(f"Available Devices: {devices}")
+            
+            # Current selection from UI
+            try:
+                current_device = self.device_combo.currentText()
+            except Exception:
+                current_device = "Unknown"
+            info_lines.append(f"Current UI Device: `{current_device}`")
+            
+            if "NPU" in devices:
+                try:
+                    npu_name = core.get_property("NPU", "FULL_DEVICE_NAME")
+                    info_lines.append(f"NPU FULL_DEVICE_NAME: `{npu_name}`")
+                except Exception as e:
+                    info_lines.append(f"Could not get NPU FULL_DEVICE_NAME: {e}")
+                
+                # Attempt to compile current LLM model on NPU to verify execution device
+                try:
+                    model_dir = getattr(gr_backend, "llm_model_dir", None)
+                    if model_dir:
+                        model_xml = Path(model_dir) / "openvino_model.xml"
+                        if model_xml.exists():
+                            compiled = core.compile_model(str(model_xml), "NPU")
+                            try:
+                                exec_devices = compiled.get_property("EXECUTION_DEVICES")
+                            except Exception:
+                                exec_devices = "(Property not available)"
+                            info_lines.append(f"LLM compile on NPU: ✅ Execution devices: `{exec_devices}`")
+                        else:
+                            info_lines.append("LLM model XML not found at current path.")
+                    else:
+                        info_lines.append("LLM model directory is not set.")
+                except Exception as e:
+                    info_lines.append(f"LLM compile on NPU: ❌ {e}")
+            else:
+                info_lines.append("NPU not detected in available devices.")
+            
+            # Note about embeddings/reranker
+            info_lines.append("\nNote: Embedding and reranker models run on CPU when NPU is selected (by design). Only the LLM runs on NPU.")
+        except Exception as e:
+            info_lines.append(f"Error during NPU diagnostics: {e}")
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("NPU Diagnostics")
+        dialog.setModal(True)
+        dialog.resize(700, 450)
+        
+        layout = QVBoxLayout(dialog)
+        npu_text = QTextBrowser()
+        npu_text.setMarkdown("\n".join(info_lines))
+        layout.addWidget(npu_text)
         
         button_box = QDialogButtonBox(QDialogButtonBox.Ok)
         button_box.accepted.connect(dialog.accept)
