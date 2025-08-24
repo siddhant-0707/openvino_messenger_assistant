@@ -80,6 +80,11 @@ from telegram_rag_gradio import (
     DEFAULT_LANGUAGE, DEFAULT_LLM_MODEL, DEFAULT_EMBEDDING_MODEL,
     DEFAULT_RERANK_MODEL, DEFAULT_DEVICE, DEFAULT_EMBEDDING_TYPE
 )
+import telegram_rag_gradio as gr_backend
+from npu_models import (
+    get_npu_models, is_npu_device, get_npu_model_path, is_npu_compatible_model,
+    add_npu_models_to_config
+)
 from llm_config import SUPPORTED_LLM_MODELS, SUPPORTED_EMBEDDING_MODELS, SUPPORTED_RERANK_MODELS
 
 
@@ -354,6 +359,8 @@ class ModelConfigPanel(QWidget):
         self.device_combo.addItems(get_available_devices())
         self.device_combo.setCurrentText(DEFAULT_DEVICE)
         self.device_combo.currentTextChanged.connect(self.device_changed.emit)
+        # Also refresh models when device changes (handles NPU-specific lists)
+        self.device_changed.connect(self.on_device_changed)
         model_layout.addRow("Device:", self.device_combo)
         
         # Embedding implementation
@@ -403,7 +410,16 @@ class ModelConfigPanel(QWidget):
     def load_available_models(self):
         """Load available models from OpenVINO collection"""
         try:
-            self.available_models = get_available_openvino_llm_models()
+            # Use current device selection to fetch appropriate models (handles NPU)
+            current_device = None
+            try:
+                current_device = self.device_combo.currentText()
+            except Exception:
+                current_device = None
+            if current_device:
+                self.available_models = get_available_openvino_llm_models(device=current_device)
+            else:
+                self.available_models = get_available_openvino_llm_models()
             self.update_llm_model_choices()
         except Exception as e:
             print(f"Error loading models: {e}")
@@ -412,6 +428,7 @@ class ModelConfigPanel(QWidget):
         """Update LLM model choices"""
         self.llm_model_combo.clear()
         for model_id in self.available_models.keys():
+            # Works for both regular and NPU models (repo_id keys)
             display_name = get_model_display_name(model_id)
             self.llm_model_combo.addItem(display_name, model_id)
         
@@ -419,6 +436,9 @@ class ModelConfigPanel(QWidget):
         default_index = self.llm_model_combo.findData(DEFAULT_LLM_MODEL)
         if default_index >= 0:
             self.llm_model_combo.setCurrentIndex(default_index)
+        elif self.llm_model_combo.count() > 0:
+            # Fallback to first item if default not present (e.g., NPU list)
+            self.llm_model_combo.setCurrentIndex(0)
     
     def update_model_choices(self, language):
         """Update model choices based on language"""
@@ -429,13 +449,21 @@ class ModelConfigPanel(QWidget):
     def update_precision_choices(self):
         """Update precision choices based on selected LLM"""
         current_model = self.llm_model_combo.currentData()
+        self.llm_precision_combo.clear()
         if current_model and current_model in self.available_models:
-            self.llm_precision_combo.clear()
-            self.llm_precision_combo.addItems(self.available_models[current_model])
+            precisions = self.available_models[current_model]
+            # If precisions is a list (regular models), use it; otherwise default to INT4 (NPU)
+            if isinstance(precisions, list):
+                self.llm_precision_combo.addItems(precisions)
+            else:
+                self.llm_precision_combo.addItems(["int4"])  # NPU models are INT4
+        else:
+            self.llm_precision_combo.addItems(["int4"])  # Safe default
     
     def refresh_models(self):
         """Refresh available models"""
         self.load_available_models()
+        self.update_precision_choices()
     
     def reload_models(self):
         """Emit signal to reload models"""
@@ -460,6 +488,14 @@ class ModelConfigPanel(QWidget):
             self.device_combo.currentText(),
             embedding_type
         )
+
+    def on_device_changed(self, device):
+        """Handle device change to refresh model list (including NPU handling)"""
+        try:
+            self.load_available_models()
+            self.update_precision_choices()
+        except Exception as e:
+            print(f"Error updating models for device '{device}': {e}")
     
     def show_gpu_diagnostics(self):
         """Show GPU diagnostics dialog"""
@@ -2100,10 +2136,39 @@ class TelegramRAGMainWindow(QMainWindow):
         """Reload models with new configuration"""
         self.status_panel.log_message(f"Reloading models: {llm_model}, Device: {device}")
         
+        # Update backend model paths before loading (supports NPU)
+        try:
+            # Determine if NPU and if selected model is NPU-optimized
+            if is_npu_device(device) and is_npu_compatible_model(llm_model):
+                # Ensure NPU models are added to config
+                add_npu_models_to_config()
+                # Find NPU model info by repo_id
+                npu_list = get_npu_models("llm")
+                selected_info = None
+                for m in npu_list:
+                    if m.get("repo_id") == llm_model or m.get("name") == llm_model:
+                        selected_info = m
+                        break
+                if selected_info:
+                    # Set LLM path to NPU-optimized model
+                    gr_backend.llm_model_dir = get_npu_model_path(selected_info, models_dir)
+                else:
+                    # Fallback to standard OV model repo
+                    gr_backend.llm_model_dir = download_ov_model_if_needed(llm_model, llm_precision, "llm") or get_ov_model_path(llm_model, llm_precision)
+            else:
+                # Standard OpenVINO preconverted model
+                gr_backend.llm_model_dir = download_ov_model_if_needed(llm_model, llm_precision, "llm") or get_ov_model_path(llm_model, llm_precision)
+            
+            # Embedding and reranker (standard OV repos)
+            gr_backend.embedding_model_dir = download_ov_model_if_needed(embedding_model, "int8", "embedding") or Path(embedding_model)
+            gr_backend.rerank_model_dir = download_ov_model_if_needed(reranker_model, "int8", "rerank") or Path(reranker_model)
+        except Exception as e:
+            self.status_panel.log_message(f"Error preparing model paths: {e}")
+        
         # Update status
         self.status_panel.update_model_status("Loading...")
         
-        # Start model loading in background
+        # Start model loading in background (will use updated paths)
         thread = threading.Thread(
             target=self.model_worker.load_models,
             args=(device, embedding_type)
