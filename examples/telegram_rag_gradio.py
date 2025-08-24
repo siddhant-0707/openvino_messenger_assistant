@@ -274,7 +274,12 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
     # Parse the device selection to get actual OpenVINO device ID
     actual_device = parse_device_name(device)
     
-    # For NPU devices, set batch size to 1 for best compatibility
+    # Decide per-component devices
+    # Run LLM on NPU if selected; keep embedding and reranker on CPU for NPU to avoid plugin compile errors
+    llm_device = actual_device
+    embed_rerank_device = "CPU" if using_npu else actual_device
+    
+    # For NPU devices, set batch size to 1 for best compatibility (applies to LLM only)
     batch_size = 1 if using_npu else (2 if "GPU" in actual_device else 4)
     
     try:
@@ -286,30 +291,30 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
                     print(f"🔄 Loading TextEmbeddingPipeline...")
                     embedding = OpenVINOTextEmbeddings(
                         model_path=str(embedding_model_dir),
-                        device=actual_device,
-                        batch_size=2 if "GPU" in actual_device else 4,  # Reduce batch size for GPU
+                        device=embed_rerank_device,
+                        batch_size=2 if "GPU" in embed_rerank_device else 4,
                         show_progress=False,
                     )
-                    print(f"✅ TextEmbeddingPipeline loaded from {embedding_model_dir} on {device} ({actual_device})")
+                    print(f"✅ TextEmbeddingPipeline loaded from {embedding_model_dir} on {device} ({embed_rerank_device})")
                     
                 elif embedding_type == "openvino_genai":
                     # Use the legacy BGE implementation for now
                     print(f"🔄 Loading OpenVINO BGE embedding model...")
                     embedding = OpenVINOBgeEmbeddings(
                         model_path=str(embedding_model_dir),
-                        device=actual_device,
-                        model_kwargs={"device_name": actual_device},
+                        device=embed_rerank_device,
+                        model_kwargs={"device_name": embed_rerank_device},
                         encode_kwargs={
                             "mean_pooling": embedding_model_configuration["mean_pooling"],
                             "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
-                            "batch_size": 2 if "GPU" in actual_device else 4,  # Reduce batch size for GPU
+                            "batch_size": 2 if "GPU" in embed_rerank_device else 4,
                         }
                     )
-                    print(f"✅ OpenVINO BGE embedding model loaded from {embedding_model_dir} on {device} ({actual_device})")
+                    print(f"✅ OpenVINO BGE embedding model loaded from {embedding_model_dir} on {device} ({embed_rerank_device})")
                 else:
                     # Use the legacy implementation
                     print(f"🔄 Loading legacy OpenVINO embedding model...")
-                    embedding_config = {"device_name": actual_device}
+                    embedding_config = {"device_name": embed_rerank_device}
                     
                     embedding = OpenVINOBgeEmbeddings(
                         model_path=str(embedding_model_dir),
@@ -317,10 +322,10 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
                         encode_kwargs={
                             "mean_pooling": embedding_model_configuration["mean_pooling"],
                             "normalize_embeddings": embedding_model_configuration["normalize_embeddings"],
-                            "batch_size": 2 if "GPU" in actual_device else 4,  # Reduce batch size for GPU
+                            "batch_size": 2 if "GPU" in embed_rerank_device else 4,
                         }
                     )
-                    print(f"✅ Legacy embedding model loaded from {embedding_model_dir} on {device} ({actual_device})")
+                    print(f"✅ Legacy embedding model loaded from {embedding_model_dir} on {device} ({embed_rerank_device})")
                     
             except Exception as e:
                 print(f"❌ Error loading embedding model on {device} ({actual_device}): {e}")
@@ -366,15 +371,15 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
         # Initialize reranker model with simplified config
         if rerank_model_dir and rerank_model_dir.exists():
             try:
-                # Simple device config for reranker models
-                reranker_config = {"device_name": actual_device}
+                # Simple device config for reranker models (keep on CPU when NPU is selected)
+                reranker_config = {"device_name": embed_rerank_device}
                 
                 reranker = OpenVINOReranker(
                     model_path=str(rerank_model_dir),
                     model_kwargs=reranker_config,
-                    top_n=3 if "GPU" in actual_device else 5,  # Reduce top_n for GPU to save memory
+                    top_n=3 if "GPU" in embed_rerank_device else 5,
                 )
-                print(f"✅ Reranking model loaded from {rerank_model_dir} on {device} ({actual_device})")
+                print(f"✅ Reranking model loaded from {rerank_model_dir} on {device} ({embed_rerank_device})")
             except Exception as e:
                 print(f"❌ Error loading reranking model on {device} ({actual_device}): {e}")
                 if actual_device != "CPU":
@@ -410,12 +415,12 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
                 
                 llm = OpenVINOLLM.from_model_path(
                     model_path=str(llm_model_dir),
-                    device=actual_device,
+                    device=llm_device,
                     **llm_kwargs
                 )
                 
                 # Set conservative parameters for GPU to avoid memory issues
-                if "GPU" in actual_device:
+                if "GPU" in llm_device:
                     llm.config.max_new_tokens = 512  # Reduced for GPU
                     llm.config.temperature = 0.7
                     llm.config.top_p = 0.9
@@ -431,7 +436,7 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
                     llm.config.repetition_penalty = 1.1
                     llm.config.do_sample = True
                 
-                print(f"✅ LLM loaded from {llm_model_dir} on {device} ({actual_device})")
+                print(f"✅ LLM loaded from {llm_model_dir} on {device} ({llm_device})")
             except Exception as e:
                 print(f"❌ Error loading LLM on {device} ({actual_device}): {e}")
                 if actual_device != "CPU":
