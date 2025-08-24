@@ -143,6 +143,9 @@ llm_model_dir = download_ov_model_if_needed(DEFAULT_LLM_MODEL, "int4", "llm") or
 embedding = None
 reranker = None
 llm = None
+ACTIVE_LLM_DEVICE = None
+ACTIVE_EMBED_DEVICE = None
+ACTIVE_RERANK_DEVICE = None
 
 def get_available_devices():
     """Get available OpenVINO devices with descriptive GPU names"""
@@ -278,6 +281,12 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
     # Run LLM on NPU if selected; keep embedding and reranker on CPU for NPU to avoid plugin compile errors
     llm_device = actual_device
     embed_rerank_device = "CPU" if using_npu else actual_device
+    
+    # Expose active device selections
+    global ACTIVE_LLM_DEVICE, ACTIVE_EMBED_DEVICE, ACTIVE_RERANK_DEVICE
+    ACTIVE_LLM_DEVICE = llm_device
+    ACTIVE_EMBED_DEVICE = embed_rerank_device
+    ACTIVE_RERANK_DEVICE = embed_rerank_device
     
     # For NPU devices, set batch size to 1 for best compatibility (applies to LLM only)
     batch_size = 1 if using_npu else (2 if "GPU" in actual_device else 4)

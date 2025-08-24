@@ -546,24 +546,16 @@ class ModelConfigPanel(QWidget):
                 except Exception as e:
                     info_lines.append(f"Could not get NPU FULL_DEVICE_NAME: {e}")
                 
-                # Attempt to compile current LLM model on NPU to verify execution device
+                # Report active devices from backend (reflects runtime binding)
                 try:
-                    model_dir = getattr(gr_backend, "llm_model_dir", None)
-                    if model_dir:
-                        model_xml = Path(model_dir) / "openvino_model.xml"
-                        if model_xml.exists():
-                            compiled = core.compile_model(str(model_xml), "NPU")
-                            try:
-                                exec_devices = compiled.get_property("EXECUTION_DEVICES")
-                            except Exception:
-                                exec_devices = "(Property not available)"
-                            info_lines.append(f"LLM compile on NPU: ✅ Execution devices: `{exec_devices}`")
-                        else:
-                            info_lines.append("LLM model XML not found at current path.")
-                    else:
-                        info_lines.append("LLM model directory is not set.")
+                    active_llm = getattr(gr_backend, "ACTIVE_LLM_DEVICE", None)
+                    active_emb = getattr(gr_backend, "ACTIVE_EMBED_DEVICE", None)
+                    active_rerank = getattr(gr_backend, "ACTIVE_RERANK_DEVICE", None)
+                    info_lines.append(f"Active LLM Device: `{active_llm}`")
+                    info_lines.append(f"Active Embedding Device: `{active_emb}`")
+                    info_lines.append(f"Active Reranker Device: `{active_rerank}`")
                 except Exception as e:
-                    info_lines.append(f"LLM compile on NPU: ❌ {e}")
+                    info_lines.append(f"Could not read active devices: {e}")
             else:
                 info_lines.append("NPU not detected in available devices.")
             
