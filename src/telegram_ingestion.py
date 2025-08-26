@@ -28,9 +28,12 @@ class TelegramChannelIngestion:
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(exist_ok=True)
         
-    async def start(self):
-        """Start the Telegram client"""
-        await self.client.start()
+    async def start(self, phone: str | None = None, code_callback=None):
+        """Start the Telegram client with optional phone and code callback for non-terminal login"""
+        if phone or code_callback:
+            await self.client.start(phone=phone, code_callback=code_callback)
+        else:
+            await self.client.start()
         
     async def stop(self):
         """Stop the Telegram client"""
@@ -143,6 +146,41 @@ class TelegramChannelIngestion:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_messages(all_messages, f"telegram_messages_{timestamp}.json")
         return all_messages
+
+# Convenience login helpers for GUI flows
+async def send_login_code_async(api_id: str, api_hash: str, phone: str, session_name: str = "telegram_session", storage_dir: str = "telegram_data") -> str:
+    """Send a login code to the user's phone without terminal prompts."""
+    storage = Path(storage_dir)
+    storage.mkdir(exist_ok=True)
+    client = TelegramClient(str(storage / session_name), api_id, api_hash)
+    await client.connect()
+    try:
+        await client.send_code_request(phone)
+        return "Verification code sent to your Telegram."
+    finally:
+        await client.disconnect()
+
+async def verify_login_code_async(api_id: str, api_hash: str, phone: str, code: str, session_name: str = "telegram_session", storage_dir: str = "telegram_data") -> str:
+    """Verify the login code and persist the session to disk."""
+    storage = Path(storage_dir)
+    storage.mkdir(exist_ok=True)
+    client = TelegramClient(str(storage / session_name), api_id, api_hash)
+    await client.connect()
+    try:
+        await client.sign_in(phone=phone, code=code)
+        return "Telegram login successful. Session saved."
+    finally:
+        await client.disconnect()
+
+def send_login_code(api_id: str, api_hash: str, phone: str, session_name: str = "telegram_session", storage_dir: str = "telegram_data") -> str:
+    """Sync wrapper for sending login code."""
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(send_login_code_async(api_id, api_hash, phone, session_name, storage_dir))
+
+def verify_login_code(api_id: str, api_hash: str, phone: str, code: str, session_name: str = "telegram_session", storage_dir: str = "telegram_data") -> str:
+    """Sync wrapper for verifying login code."""
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(verify_login_code_async(api_id, api_hash, phone, code, session_name, storage_dir))
 
 # Example usage:
 async def main():

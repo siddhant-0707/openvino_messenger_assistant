@@ -16,7 +16,13 @@ from telegram_rag_integration import TelegramRAGIntegration
 import openvino as ov
 from openvino_tokenizers import convert_tokenizer
 from transformers import AutoTokenizer, AutoModel
-from ov_langchain_helper import OpenVINOLLM, OpenVINOBgeEmbeddings, OpenVINOReranker, OpenVINOTextEmbeddings
+from ov_langchain_helper import (
+    OpenVINOLLM,
+    OpenVINOBgeEmbeddings,
+    OpenVINOReranker,
+    OpenVINOTextEmbeddings,
+    OpenVINOTextReranker,
+)
 from langchain_community.vectorstores import FAISS
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.chains import RetrievalQA
@@ -377,30 +383,38 @@ def initialize_models(device="AUTO", embedding_type="text_embedding_pipeline"):
             print(f"❌ Embedding model not found at {embedding_model_dir}")
             embedding = None
         
-        # Initialize reranker model with simplified config
+        # Initialize reranker using TextRerankPipeline when available
         if rerank_model_dir and rerank_model_dir.exists():
             try:
-                # Simple device config for reranker models (keep on CPU when NPU is selected)
-                reranker_config = {"device_name": embed_rerank_device}
-                
-                reranker = OpenVINOReranker(
+                # Prefer TextRerankPipeline (OpenVINO GenAI)
+                reranker = OpenVINOTextReranker(
                     model_path=str(rerank_model_dir),
-                    model_kwargs=reranker_config,
+                    device=embed_rerank_device,
                     top_n=3 if "GPU" in embed_rerank_device else 5,
                 )
-                print(f"✅ Reranking model loaded from {rerank_model_dir} on {device} ({embed_rerank_device})")
+                print(f"✅ TextRerankPipeline loaded from {rerank_model_dir} on {device} ({embed_rerank_device})")
             except Exception as e:
-                print(f"❌ Error loading reranking model on {device} ({actual_device}): {e}")
-                if actual_device != "CPU":
-                    print("🔄 Falling back to CPU for reranking model...")
+                print(f"❌ Error loading TextRerankPipeline on {device} ({embed_rerank_device}): {e}")
+                # Fallback to legacy OpenVINO reranker
+                try:
                     reranker = OpenVINOReranker(
                         model_path=str(rerank_model_dir),
-                        model_kwargs={"device_name": "CPU"},
-                        top_n=5,
+                        model_kwargs={"device_name": embed_rerank_device},
+                        top_n=3 if "GPU" in embed_rerank_device else 5,
                     )
-                    print(f"✅ Reranking model loaded on CPU (fallback)")
-                else:
-                    reranker = None
+                    print(f"✅ Legacy reranker loaded from {rerank_model_dir} on {device} ({embed_rerank_device})")
+                except Exception as e2:
+                    print(f"❌ Error loading legacy reranker: {e2}")
+                    if actual_device != "CPU":
+                        print("🔄 Falling back to CPU for reranking model...")
+                        reranker = OpenVINOReranker(
+                            model_path=str(rerank_model_dir),
+                            model_kwargs={"device_name": "CPU"},
+                            top_n=5,
+                        )
+                        print(f"✅ Reranking model loaded on CPU (fallback)")
+                    else:
+                        reranker = None
         else:
             print(f"❌ Reranking model not found at {rerank_model_dir}")
             reranker = None
@@ -579,11 +593,14 @@ async def download_messages_async(channels_str: str, limit: int, hours: int) -> 
         return "Please provide at least one channel name", ""
     
     try:
+        # Prefer saved session; if no env vars, still allow session usage
         api_id = os.getenv("TELEGRAM_API_ID")
         api_hash = os.getenv("TELEGRAM_API_HASH")
         
         if not api_id or not api_hash:
-            return "Telegram API credentials not found! Please check your .env file.", ""
+            # Attempt to use existing session with dummy values; Telethon requires api_id/hash to build client
+            # If missing, provide a clearer message
+            return "Telegram API credentials not found. Use the GUI Telegram Setup to login once.", ""
         
         ingestion = TelegramChannelIngestion(
             api_id=api_id,

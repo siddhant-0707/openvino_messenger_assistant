@@ -698,6 +698,84 @@ class OpenVINOReranker(BaseDocumentCompressor):
         return final_results
 
 
+class OpenVINOTextReranker(BaseDocumentCompressor):
+    """
+    Reranker using OpenVINO GenAI TextRerankPipeline.
+    Mirrors the usage pattern of OpenVINOTextEmbeddings, but for reranking.
+    """
+
+    model_path: str
+    device: str = "CPU"
+    top_n: int = 4
+    _pipeline: Any = None
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        try:
+            import openvino_genai
+        except ImportError as e:
+            raise ImportError(
+                "Could not import openvino_genai python package. Please install it with: pip install -U openvino-genai"
+            ) from e
+        # Initialize the TextRerankPipeline
+        self._pipeline = openvino_genai.TextRerankPipeline(self.model_path, self.device)
+
+    def compress_documents(
+        self,
+        documents: Sequence[Document],
+        query: str,
+        callbacks: Optional[Callbacks] = None,
+    ) -> Sequence[Document]:
+        # Prepare plain text passages
+        passages = [doc.page_content for doc in documents]
+        if not passages:
+            return []
+        try:
+            # Run reranking via pipeline
+            results = self._pipeline.rerank(query, passages)
+            # Normalize results to a list of (index, score)
+            indices_scores: List[tuple[int, float]] = []
+            if isinstance(results, (list, tuple)) and results:
+                first = results[0]
+                if isinstance(first, dict) and "score" in first:
+                    # Expect optional 'index' or implicit order
+                    for i, r in enumerate(results):
+                        idx = r.get("index", i)
+                        indices_scores.append((int(idx), float(r["score"])))
+                elif isinstance(first, (float, int)):
+                    for i, s in enumerate(results):
+                        indices_scores.append((i, float(s)))
+                elif isinstance(first, (list, tuple)) and len(first) >= 2:
+                    # Assume (index, score)
+                    for pair in results:
+                        indices_scores.append((int(pair[0]), float(pair[1])))
+            # Sort by score desc and take top_n
+            if not indices_scores:
+                # Fallback to original order if rerank didn't return usable scores
+                selected = list(range(min(self.top_n, len(passages))))
+            else:
+                indices_scores.sort(key=lambda x: x[1], reverse=True)
+                selected = [idx for idx, _ in indices_scores[: self.top_n]]
+            # Build Documents subset in ranked order
+            final_results: List[Document] = []
+            for idx in selected:
+                if 0 <= idx < len(documents):
+                    # Attach score if available
+                    meta = dict(documents[idx].metadata)
+                    score = None
+                    for i_s in indices_scores:
+                        if i_s[0] == idx:
+                            score = i_s[1]
+                            break
+                    if score is not None:
+                        meta["relevance_score"] = score
+                    final_results.append(Document(page_content=documents[idx].page_content, metadata=meta))
+            return final_results
+        except Exception:
+            # On any failure, gracefully return the first top_n documents
+            return list(documents)[: self.top_n]
+
+
 class OpenVINOTextEmbeddings(BaseModel, Embeddings):
     """OpenVINO GenAI Text Embedding Pipeline implementation.
     

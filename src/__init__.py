@@ -14,21 +14,8 @@ This package provides:
 __version__ = "1.0.0"
 __author__ = "OpenVINO Telegram RAG Team"
 
-# Core imports for easy access
-from .telegram_ingestion import TelegramChannelIngestion
-from .telegram_rag_integration import TelegramRAGIntegration
-from .ov_langchain_helper import (
-    OpenVINOLLM, 
-    OpenVINOBgeEmbeddings, 
-    OpenVINOReranker, 
-    OpenVINOTextEmbeddings
-)
-
+# Avoid importing submodules at package import time to prevent side effects
 __all__ = [
-    "TelegramChannelIngestion",
-    "TelegramRAGIntegration", 
-    "OpenVINOLLM",
-    "OpenVINOBgeEmbeddings",
-    "OpenVINOReranker",
-    "OpenVINOTextEmbeddings"
+    "__version__",
+    "__author__",
 ]

@@ -85,6 +85,7 @@ from npu_models import (
     get_npu_models, is_npu_device, get_npu_model_path, is_npu_compatible_model,
     add_npu_models_to_config
 )
+from telegram_ingestion import TelegramChannelIngestion
 from llm_config import SUPPORTED_LLM_MODELS, SUPPORTED_EMBEDDING_MODELS, SUPPORTED_RERANK_MODELS
 
 
@@ -363,15 +364,7 @@ class ModelConfigPanel(QWidget):
         self.device_changed.connect(self.on_device_changed)
         model_layout.addRow("Device:", self.device_combo)
         
-        # Embedding implementation
-        self.embedding_type_combo = QComboBox()
-        self.embedding_type_combo.addItems([
-            "TextEmbeddingPipeline (Latest)",
-            "OpenVINO GenAI", 
-            "Legacy OpenVINO"
-        ])
-        self.embedding_type_combo.setCurrentText("TextEmbeddingPipeline (Latest)")
-        model_layout.addRow("Embedding Implementation:", self.embedding_type_combo)
+        # Embedding implementation removed; default is TextEmbeddingPipeline
         
         # Buttons
         buttons_layout = QHBoxLayout()
@@ -471,17 +464,8 @@ class ModelConfigPanel(QWidget):
     
     def reload_models(self):
         """Emit signal to reload models"""
-        # Get embedding type mapping
-        embedding_type_mapping = {
-            "TextEmbeddingPipeline (Latest)": "text_embedding_pipeline",
-            "OpenVINO GenAI": "openvino_genai",
-            "Legacy OpenVINO": "legacy"
-        }
-        
-        embedding_type = embedding_type_mapping.get(
-            self.embedding_type_combo.currentText(), 
-            "text_embedding_pipeline"
-        )
+        # Always use TextEmbeddingPipeline (default)
+        embedding_type = "text_embedding_pipeline"
         
         self.model_reload_requested.emit(
             self.language_combo.currentText(),
@@ -602,6 +586,12 @@ class TelegramPanel(QWidget):
     def setup_ui(self):
         layout = QVBoxLayout(self)
         
+        # Info on credentials usage (manual .env approach)
+        creds_info = QLabel("Set TELEGRAM_API_ID and TELEGRAM_API_HASH in your .env file before fetching channels." )
+        creds_info.setWordWrap(True)
+        creds_info.setStyleSheet("color: #666666; font-size: 12px;")
+        layout.addWidget(creds_info)
+
         # Channel Discovery Section
         discovery_group = QGroupBox("📡 Discover Your Telegram Channels")
         discovery_layout = QVBoxLayout(discovery_group)
@@ -785,6 +775,8 @@ class TelegramPanel(QWidget):
         self.channels_fetch_requested.emit()
         self.fetch_channels_btn.setEnabled(False)
         self.fetch_channels_btn.setText("Fetching...")
+
+    # Removed proxy-based login helpers; using .env credentials and terminal login as before
     
     def on_channels_fetched(self, channels):
         """Handle fetched channels data"""
