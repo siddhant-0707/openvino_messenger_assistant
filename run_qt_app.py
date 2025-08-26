@@ -13,16 +13,20 @@ from pathlib import Path
 def main():
     """Launch the Qt application"""
     try:
-        # Add src directory to Python path for imports
-        project_root = Path(__file__).parent
-        src_path = project_root / "src"
-        sys.path.insert(0, str(src_path))
-        
-        # Import and run the Qt application
-        from telegram_rag_qt import main as qt_main
+        # Prefer package import so PyInstaller bundles the module
+        from src.telegram_rag_qt import main as qt_main
         qt_main()
     except ImportError as e:
-        print(f"Error importing Qt application: {e}")
+        # Fallback to source layout (development mode)
+        try:
+            project_root = Path(__file__).parent
+            src_path = project_root / "src"
+            sys.path.insert(0, str(src_path))
+            from telegram_rag_qt import main as qt_main  # type: ignore
+            qt_main()
+            return
+        except Exception:
+            print(f"Error importing Qt application: {e}")
         print("Please ensure PySide6 is installed:")
         print("pip install PySide6")
         print("Also ensure all source files are in the src/ directory")
