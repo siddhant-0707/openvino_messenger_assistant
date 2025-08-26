@@ -429,13 +429,26 @@ class ModelConfigPanel(QWidget):
             display_name = get_model_display_name(model_id)
             self.llm_model_combo.addItem(display_name, model_id)
         
-        # Set default
-        default_index = self.llm_model_combo.findData(DEFAULT_LLM_MODEL)
-        if default_index >= 0:
-            self.llm_model_combo.setCurrentIndex(default_index)
-        elif self.llm_model_combo.count() > 0:
-            # Fallback to first item if default not present (e.g., NPU list)
-            self.llm_model_combo.setCurrentIndex(0)
+        # Set default (NPU-aware)
+        preferred_npu = "OpenVINO/DeepSeek-R1-Distill-Qwen-1.5B-int4-cw-ov"
+        current_device = None
+        try:
+            current_device = self.device_combo.currentText()
+        except Exception:
+            current_device = None
+        if current_device and "NPU" in current_device.upper():
+            npu_index = self.llm_model_combo.findData(preferred_npu)
+            if npu_index >= 0:
+                self.llm_model_combo.setCurrentIndex(npu_index)
+            elif self.llm_model_combo.count() > 0:
+                self.llm_model_combo.setCurrentIndex(0)
+        else:
+            # Match available model keys which are typically lowercase
+            default_index = self.llm_model_combo.findData((DEFAULT_LLM_MODEL or "").lower())
+            if default_index >= 0:
+                self.llm_model_combo.setCurrentIndex(default_index)
+            elif self.llm_model_combo.count() > 0:
+                self.llm_model_combo.setCurrentIndex(0)
     
     def update_model_choices(self, language):
         """Update model choices based on language"""
@@ -685,8 +698,8 @@ class TelegramPanel(QWidget):
         
         self.limit_slider = QSlider(Qt.Horizontal)
         self.limit_slider.setRange(1, 1000)
-        self.limit_slider.setValue(100)
-        self.limit_label = QLabel("100")
+        self.limit_slider.setValue(40)
+        self.limit_label = QLabel("40")
         self.limit_slider.valueChanged.connect(lambda v: self.limit_label.setText(str(v)))
         
         limit_layout = QHBoxLayout()
@@ -696,8 +709,8 @@ class TelegramPanel(QWidget):
         
         self.hours_slider = QSlider(Qt.Horizontal)
         self.hours_slider.setRange(1, 168)
-        self.hours_slider.setValue(24)
-        self.hours_label = QLabel("24")
+        self.hours_slider.setValue(1)
+        self.hours_label = QLabel("1")
         self.hours_slider.valueChanged.connect(lambda v: self.hours_label.setText(str(v)))
         
         hours_layout = QHBoxLayout()
@@ -1674,7 +1687,7 @@ class QAPanel(QWidget):
         """Setup generation parameters (collapsible)"""
         # Default parameter values
         self.temperature = 0.7
-        self.num_context = 5
+        self.num_context = 90
         self.repetition_penalty = 1.1
         self.show_retrieved = False
         self.show_thinking = False  # Option to show/hide <think> blocks
