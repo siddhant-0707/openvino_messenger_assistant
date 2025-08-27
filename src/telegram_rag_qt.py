@@ -232,6 +232,10 @@ class StatusPanel(QWidget):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_label = QLabel("")
+        # Unified auto-hide timer that resets on every progress update
+        self.progress_hide_timer = QTimer(self)
+        self.progress_hide_timer.setSingleShot(True)
+        self.progress_hide_timer.timeout.connect(self.hide_progress)
         
         # Logs section
         logs_group = QGroupBox("Activity Logs")
@@ -268,11 +272,15 @@ class StatusPanel(QWidget):
         self.log_message(f"Device Changed: {device}")
     
     def show_progress(self, percentage, message=""):
+        # Cancel any pending hide to keep the bar visible across phases
+        if hasattr(self, 'progress_hide_timer') and self.progress_hide_timer.isActive():
+            self.progress_hide_timer.stop()
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(percentage)
         self.progress_label.setText(message)
+        # Only schedule hide when at 100%, and allow interruption by next update
         if percentage >= 100:
-            QTimer.singleShot(2000, self.hide_progress)  # Hide after 2 seconds
+            self.progress_hide_timer.start(2000)
     
     def hide_progress(self):
         self.progress_bar.setVisible(False)
@@ -894,6 +902,11 @@ class TelegramPanel(QWidget):
         self.select_none_btn.setEnabled(selected_count > 0)
         
         # Update status
+        self.update_download_button_text()
+
+    def update_download_button_text(self):
+        """Update download button text based on current selection"""
+        selected_count = self.get_selected_channels_count()
         if selected_count > 0:
             self.download_btn.setText(f"📥 Download & Process from {selected_count} Channel{'s' if selected_count != 1 else ''}")
         else:
@@ -935,6 +948,7 @@ class TelegramPanel(QWidget):
         limit = self.limit_slider.value()
         hours = self.hours_slider.value()
         
+        self.set_operation_in_progress(True)
         self.download_requested.emit(selected_channels, limit, hours)
     
     def download_and_process(self):
@@ -945,6 +959,7 @@ class TelegramPanel(QWidget):
             return
         limit = self.limit_slider.value()
         hours = self.hours_slider.value()
+        self.set_operation_in_progress(True)
         self.download_and_process_requested.emit(selected_channels, limit, hours)
     
     def process_messages(self):
@@ -961,6 +976,15 @@ class TelegramPanel(QWidget):
     def update_process_status(self, status):
         """Update process status display"""
         self.process_status.setText(status)
+
+    def set_operation_in_progress(self, in_progress: bool):
+        """Toggle the button to show loading/working state"""
+        if in_progress:
+            self.download_btn.setEnabled(False)
+            self.download_btn.setText("⏳ Downloading & Processing...")
+        else:
+            self.download_btn.setEnabled(self.get_selected_channels_count() > 0)
+            self.update_download_button_text()
 
 
 class QueryPanel(QWidget):
@@ -2314,9 +2338,12 @@ class TelegramRAGMainWindow(QMainWindow):
         # Update status panels if needed
         if "download" in message.lower():
             self.telegram_panel.update_download_status(message)
+            # Keep button in loading state; processing follows automatically in combined flow
         elif "process" in message.lower():
             # Route process completion into the unified status area
             self.telegram_panel.update_download_status(message)
+            # Restore button to normal
+            self.telegram_panel.set_operation_in_progress(False)
         elif "model" in message.lower():
             self.status_panel.update_model_status("Loaded")
     
