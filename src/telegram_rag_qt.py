@@ -590,6 +590,7 @@ class TelegramPanel(QWidget):
     download_requested = Signal(list, int, int)  # channels, limit, hours
     process_requested = Signal()
     channels_fetch_requested = Signal()  # New signal for fetching channels
+    download_and_process_requested = Signal(list, int, int)
     
     def __init__(self):
         super().__init__()
@@ -718,8 +719,8 @@ class TelegramPanel(QWidget):
         hours_layout.addWidget(self.hours_label)
         download_layout.addRow("Hours to Look Back:", hours_layout)
         
-        self.download_btn = QPushButton("📥 Download Messages")
-        self.download_btn.clicked.connect(self.download_messages)
+        self.download_btn = QPushButton("📥 Download & Process")
+        self.download_btn.clicked.connect(self.download_and_process)
         self.download_btn.setEnabled(False)  # Disabled until channels are selected
         self.download_btn.setStyleSheet("""
             QPushButton {
@@ -743,13 +744,13 @@ class TelegramPanel(QWidget):
         self.download_status = QTextEdit()
         self.download_status.setMaximumHeight(100)
         self.download_status.setReadOnly(True)
-        download_layout.addRow("Download Status:", self.download_status)
+        download_layout.addRow("Download/Processing Status:", self.download_status)
         
         # Process Messages Section
         process_group = QGroupBox("🔄 Process Downloaded Messages")
         process_layout = QVBoxLayout(process_group)
         
-        process_info = QLabel("Convert downloaded messages into a searchable vector store for AI-powered querying.")
+        process_info = QLabel("Convert downloaded messages into a searchable vector store for AI-powered querying. (Runs automatically after download)")
         process_info.setWordWrap(True)
         process_info.setStyleSheet("color: #666666; margin-bottom: 8px;")
         process_layout.addWidget(process_info)
@@ -770,12 +771,15 @@ class TelegramPanel(QWidget):
                 background-color: #F57C00;
             }
         """)
+        self.process_btn.setVisible(False)
         process_layout.addWidget(self.process_btn)
         
         self.process_status = QTextEdit()
         self.process_status.setMaximumHeight(100)
         self.process_status.setReadOnly(True)
         process_layout.addWidget(self.process_status)
+        # Hide entire process group; combined flow uses the single blue button
+        process_group.setVisible(False)
         
         # Add to main layout
         layout.addWidget(discovery_group)
@@ -891,9 +895,9 @@ class TelegramPanel(QWidget):
         
         # Update status
         if selected_count > 0:
-            self.download_btn.setText(f"📥 Download from {selected_count} Channel{'s' if selected_count != 1 else ''}")
+            self.download_btn.setText(f"📥 Download & Process from {selected_count} Channel{'s' if selected_count != 1 else ''}")
         else:
-            self.download_btn.setText("📥 Download Messages")
+            self.download_btn.setText("📥 Download & Process")
     
     def get_selected_channels_count(self):
         """Get count of selected channels"""
@@ -933,13 +937,26 @@ class TelegramPanel(QWidget):
         
         self.download_requested.emit(selected_channels, limit, hours)
     
+    def download_and_process(self):
+        """Handle combined download then process request"""
+        selected_channels = self.get_selected_channels()
+        if not selected_channels:
+            self.download_status.setText("Please select at least one channel")
+            return
+        limit = self.limit_slider.value()
+        hours = self.hours_slider.value()
+        self.download_and_process_requested.emit(selected_channels, limit, hours)
+    
     def process_messages(self):
         """Handle process messages request"""
         self.process_requested.emit()
     
     def update_download_status(self, status):
         """Update download status display"""
-        self.download_status.setText(status)
+        try:
+            self.download_status.append(status)
+        except Exception:
+            self.download_status.setText(status)
     
     def update_process_status(self, status):
         """Update process status display"""
@@ -2194,6 +2211,7 @@ class TelegramRAGMainWindow(QMainWindow):
         # Telegram operations signals
         self.telegram_panel.download_requested.connect(self.download_messages)
         self.telegram_panel.process_requested.connect(self.process_messages)
+        self.telegram_panel.download_and_process_requested.connect(self.download_and_process)
         self.telegram_panel.channels_fetch_requested.connect(self.fetch_channels)
         
         # Connect model worker channels signal to telegram panel
@@ -2252,6 +2270,7 @@ class TelegramRAGMainWindow(QMainWindow):
             args=(channels, limit, hours)
         )
         thread.start()
+        return thread
     
     def process_messages(self):
         """Process messages in background"""
@@ -2261,6 +2280,20 @@ class TelegramRAGMainWindow(QMainWindow):
         thread = threading.Thread(
             target=self.model_worker.process_messages_async
         )
+        thread.start()
+        return thread
+
+    def download_and_process(self, channels, limit, hours):
+        """Download messages, then process when done"""
+        def run_sequence():
+            try:
+                self.model_worker.download_messages_async(channels, limit, hours)
+                # After download completes (same thread), process
+                self.model_worker.process_messages_async()
+            except Exception as e:
+                self.on_error_occurred(str(e))
+
+        thread = threading.Thread(target=run_sequence)
         thread.start()
     
     def fetch_channels(self):
@@ -2282,7 +2315,8 @@ class TelegramRAGMainWindow(QMainWindow):
         if "download" in message.lower():
             self.telegram_panel.update_download_status(message)
         elif "process" in message.lower():
-            self.telegram_panel.update_process_status(message)
+            # Route process completion into the unified status area
+            self.telegram_panel.update_download_status(message)
         elif "model" in message.lower():
             self.status_panel.update_model_status("Loaded")
     
