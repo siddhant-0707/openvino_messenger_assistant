@@ -63,3 +63,5 @@ Thumbs.db
 
 # Session files
 *.session
+
+docs/release_guide.md
