@@ -5,6 +5,7 @@
 # OpenVINO Messenger AI‑Assistant
 
 <img src="docs/images/openvino.svg" alt="OpenVINO" height="64"/>
+
 <img src="docs/images/gsoc-logo.png" alt="Google Summer of Code" height="64"/>
 
 Private, local‑first Telegram RAG assistant with OpenVINO acceleration and a cross-platform desktop native Qt interface.
