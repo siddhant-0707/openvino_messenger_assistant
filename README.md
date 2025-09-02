@@ -1,178 +1,101 @@
-## Setup and Installation
+<div align="center">
 
-### **Method 1: PyPI Package (Recommended)**
+<img src="docs/images/OV Messenger-transparent-1756779589945.png" alt="Messenger Logo" height="128"/>
 
-```bash
-# Install from PyPI (when available)
-pip install openvino-messenger-assistant
-```
+# OpenVINO Messenger AI‑Assistant
 
-### **Method 2: From Source**
+<img src="docs/images/openvino.svg" alt="OpenVINO" height="64"/>
+<img src="docs/images/gsoc-logo.png" alt="Google Summer of Code" height="64"/>
 
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/siddhant-0707/openvino_messenger_assistant
-   cd openvino_messenger_assistant
-   ```
+Private, local‑first Telegram RAG assistant with OpenVINO acceleration and a cross-platform desktop native Qt interface.
 
-2. **Create a Virtual Environment**
-   ```bash
-   python3 -m venv openvino_env
-   ```
+[Releases](https://github.com/siddhant-0707/openvino_messenger_assistant/releases) · [Docs](./docs/ARCHITECTURE.md) · [Medium](https://medium.com/openvino-toolkit/draft-work-in-progress-30b29ed4f8b2)
 
-3. **Activate the Environment**
-   ```bash
-   source openvino_env/bin/activate  # Linux/Mac
-   # or
-   openvino_env\Scripts\activate     # Windows
-   ```
+![Chat Screenshot](docs/images/chat-sample.png)
 
-4. **Install the Package**
-   ```bash
-   python -m pip install --upgrade pip
-   pip install -e .
-   ```
+</div>
 
-### **Method 3: Docker**
+## Highlights
+
+- Local, private inference with OpenVINO (NPU/GPU/CPU/AUTO)
+- Desktop‑grade UX with Qt (streaming, markdown, diagnostics)
+- One‑click executables for Windows and Linux
+- Fast RAG with FAISS, BGE embeddings, optional reranking
+- Dynamic model discovery from curated OpenVINO collections
+
+## Download
+
+Grab the latest Windows and Linux builds from [GitHub Releases](https://github.com/siddhant-0707/openvino_messenger_assistant/releases) and run `TelegramRAG`.
+
+## Quickstart (From Source)
 
 ```bash
-# Pull and run the Docker image (when available)
-docker run -it openvino-messenger-assistant:1.0.0
+git clone https://github.com/siddhant-0707/openvino_messenger_assistant
+cd openvino_messenger_assistant
+python3 -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -e .
 
-# Or build from source
-docker build -t openvino-messenger-assistant .
-docker run -it openvino-messenger-assistant
+# Create .env with your Telegram API credentials
+cp env.example .env  # then edit values
+
+# Run Qt desktop app (recommended)
+python run_qt_app.py
+
+# Or run the web interface
+python examples/telegram_rag_gradio.py  # http://localhost:7860
 ```
 
-### **Method 4: Download Executable**
+## Features
 
-1. Go to [Releases](https://github.com/siddhant-0707/openvino_messenger_assistant/releases)
-2. Download the latest executable for your platform
-3. Extract and run `TelegramRAG` (Qt interface) or `TelegramRAG-Web` (Gradio interface)
+### Retrieval‑Augmented Generation
 
-## OpenVINO Model Integration
+- Chunking with metadata preservation
+- BGE embeddings (OpenVINO TextEmbeddingPipeline)
+- FAISS vector store; optional OpenVINO reranker
+- LangChain RAG chains with model‑aware prompts
 
-This application automatically downloads optimized OpenVINO models from Hugging Face. The models are:
+### Desktop Experience (Qt)
 
-- **LLM Models**: Downloaded from the [OpenVINO LLM collection](https://huggingface.co/collections/OpenVINO/llm-6687aaa2abca3bbcec71a9bd) (INT4 quantized)
-- **Embedding Models**: Downloaded from individual [OpenVINO repositories](https://huggingface.co/OpenVINO) (INT8 quantized)
-- **Reranking Models**: Downloaded from individual [OpenVINO repositories](https://huggingface.co/OpenVINO) (INT8 quantized)
+- Streaming responses with markdown rendering
+- Model/device management, GPU diagnostics, progress/error panels
+- Dockable layout, theming, activity logs
 
-All models are:
-- **Pre-optimized** with INT4/INT8 quantization for better performance
-- **Automatically downloaded** when first needed
-- **Cached locally** for subsequent use
+### Telegram Integration
 
-No manual model conversion is required! The application will download the appropriate models on first run.
+- Telethon‑based ingestion with session persistence
+- Channel discovery, time‑window filters, per‑channel limits
+- JSON exports saved under `data/telegram_data/`
 
-## Telegram Integration
+## Architecture
 
-To use the Telegram integration functionality, follow these steps:
+See the full overview in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). Key components:
 
-1. **Create a Telegram Application:**
-   - Go to [https://my.telegram.org/apps](https://my.telegram.org/apps)
-   - Log in with your Telegram account
-   - Create a new application if you haven't already
-   - Note down your `api_id` and `api_hash`
+- Ingestion: Telethon flows and JSON export
+- Processing: chunking → embeddings → FAISS index
+- Querying: retrieval → (optional rerank) → LLM generation
+- UI: Qt desktop app and optional Gradio web
 
-2. **Create a `.env` file** in the root directory with the following content:
-   ```
-   TELEGRAM_API_ID=your_api_id
-   TELEGRAM_API_HASH=your_api_hash
-   ```
-   Replace `your_api_id` and `your_api_hash` with the values from step 1.
+## Troubleshooting
 
-3. **Run the Application:**
-   
-   **Qt Desktop Application (Recommended):**
-   ```bash
-   python run_qt_app.py
-   ```
-   
-   **Gradio Web Interface:**
-   ```bash
-   python examples/telegram_rag_gradio.py
-   ```
-   Available at `http://localhost:7860`
-   
-   **Jupyter Notebook:**
-   - Explore the functionality in `examples/telegram_rag_example.ipynb`
+### GPU/NPU memory
 
-**Note:** Keep your `api_id` and `api_hash` confidential and never share them publicly.
+- If you see OpenCL errors or OOM: switch to CPU, use smaller models, or reduce tokens
+- Ensure up‑to‑date drivers and OpenVINO runtime
 
-## Interface Options
+### Login issues (Telegram)
 
-### Qt Desktop Application Features
+- Delete the session file if corrupted (`telegram_session.session`) and retry login
+- Verify API credentials and two‑factor settings
 
-The Qt for Python interface ([documentation](https://doc.qt.io/qtforpython-6/)) provides a professional desktop experience with:
+## Roadmap
 
-- **Modern Desktop UI**: Native Qt6 widgets with professional appearance
-- **Real-time Streaming**: Enhanced streaming responses with better performance  
-- **Advanced Layout**: Resizable panels, dockable windows, and customizable interface
-- **Background Operations**: Non-blocking downloads and processing with progress tracking
-- **Visual Model Management**: Real-time model status, GPU diagnostics, and memory monitoring
-- **Dark/Light Themes**: Automatic theme switching with system integration
-- **Activity Logging**: Comprehensive logging panel for debugging and monitoring
-- **Enhanced Performance**: Better memory management and threading for desktop use
+- Plugins for additional data sources
+- Multi‑modal retrieval (images/documents)
+- CI builds and PyPI package
 
-### Gradio Web Interface Features
+## Credits
 
-The web interface provides browser-based access with:
-- **Tabbed Interface**: Organized tabs for different operations
-- **Web Accessibility**: Access from any device with a web browser
-- **Streaming Support**: Real-time response generation
-- **Model Configuration**: Dynamic model selection and device management
+Built with: OpenVINO, Qt (PySide6), Telethon, FAISS, LangChain.
 
-### GPU Support & Troubleshooting
-
-The application supports GPU acceleration with Intel and NVIDIA GPUs through OpenVINO. However, GPU memory limitations can cause issues with larger models.
-
-#### Common GPU Issues
-
-**CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST Error**
-- **Cause**: GPU running out of memory or OpenCL driver issues
-- **Solutions**:
-  - Switch to CPU device in model configuration
-  - Use smaller models (DeepSeek-R1-Distill-Qwen-1.5B instead of 3B+ models)
-  - Reduce `max_new_tokens` to 256-512
-  - Close other GPU applications
-  - Restart the application
-
-### Available Models
-
-The application dynamically fetches and displays all available models from OpenVINO repositories:
-
-- **LLM Models**: Automatically discovered from the [OpenVINO LLM collection](https://huggingface.co/collections/OpenVINO/llm-6687aaa2abca3bbcec71a9bd)
-  - Qwen 2.5 series (0.5B, 1.5B, 3B, 7B, 14B)
-  - Phi-3.5 and Phi-4 models
-  - Gemma-2, TinyLlama, Mistral, Neural-Chat
-  - DeepSeek-R1 models
-  - Available in INT4, INT8, and FP16 precisions
-  
-- **Embedding Models**: BGE-small, BGE-large, BGE-M3 (INT8 quantized)  
-- **Reranking Models**: BGE-reranker variants (INT8 quantized)
-
-**Features:**
-- 🔄 **Dynamic Model Discovery**: Automatically fetches the latest available models
-- 🎯 **Precision Selection**: Choose between INT4, INT8, and FP16 based on availability
-- 📊 **User-Friendly Names**: Models displayed with readable names (e.g., "Qwen 2.5 3B Instruct")
-- ⚡ **Automatic Download**: Models downloaded on-demand when selected
-
-All models are automatically downloaded from their respective Hugging Face repositories when selected.
-
-### Manual Model Conversion (Optional)
-
-If you want to convert models manually or experiment with different settings, you can still use the Jupyter notebooks:
-
-- `telegram_rag_example.ipynb`: Complete example with Telegram integration
-- `llm-rag-langchain.ipynb`: General RAG implementation
-- `llm-rag-langchain-genai.ipynb`: RAG with OpenVINO GenAI
-
-The notebooks include options for both automatic model downloading and manual conversion using `optimum-cli`.
-
-### Sample Screenshots
-
-![Sample Screenshot](docs/images/chat-sample.png)
-![Sample Screenshot](docs/images/model-selection-sample.png)
-![Sample Screenshot](docs/images/terminal-sample.png)
-![Sample Screenshot](docs/images/web-gradio-sample.png)
+GSoC 2025 project under the OpenVINO Toolkit.
