@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/OV Messenger-transparent-1756779589945.png" alt="Messenger Logo" height="128"/>
+<img src="docs/images/OV Messenger-transparent-1756779589945 (Copy).png" alt="Messenger Logo" height="100"/>
 
 # OpenVINO Messenger AI‑Assistant
 
