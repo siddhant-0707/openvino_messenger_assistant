@@ -1,0 +1,16 @@
+[
+  {
+    "query": "What did Bloomberg report about inflation this week?",
+    "keywords": ["bloomberg", "inflation", "cpi", "prices", "economy"]
+  },
+  {
+    "query": "Summarize the latest Guardian headlines on climate change.",
+    "keywords": ["guardian", "climate", "emissions", "warming"]
+  },
+  {
+    "query": "What are the key AI announcements mentioned recently?",
+    "keywords": ["ai", "model", "openvino", "intel", "npu", "gpu"]
+  }
+]
+
+
