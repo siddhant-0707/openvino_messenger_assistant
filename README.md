@@ -68,6 +68,8 @@ python examples/telegram_rag_gradio.py  # http://localhost:7860
 - Channel discovery, time‑window filters, per‑channel limits
 - JSON exports saved under `data/telegram_data/`
 
+![Model Selection Screenshot](docs/images/model-selection-sample.png)
+
 ## Architecture
 
 See the full overview in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). Key components:
@@ -78,6 +80,10 @@ See the full overview in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md). Key c
 - UI: Qt desktop app and optional Gradio web
 
 ## Troubleshooting
+
+If you are running into issues, please check the logs and terminal output for any errors.
+
+![Terminal Screenshot](docs/images/terminal-sample.png)
 
 ### GPU/NPU memory
 
