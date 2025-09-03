@@ -2051,7 +2051,7 @@ class StreamingCallback(QObject):
             # If showing thinking is enabled, just emit everything
             self.text_updated.emit(text)
             self.last_text = text
-        else:
+        else    :
             # Filter out thinking blocks in real-time
             filtered_text = self._filter_thinking_realtime(text)
             if filtered_text != self.last_text:  # Only emit if content changed
@@ -2070,9 +2070,16 @@ class StreamingCallback(QObject):
     
     def _filter_thinking_realtime(self, text):
         """Filter thinking blocks in real-time during streaming"""
-        # First, remove any complete thinking blocks
+        # Apply DeepSeek-style filtering first (for DeepSeek-R1 models)
+        # This mimics the deepseek_partial_text_processor behavior
+        if "</think>" in text:
+            filtered_text = text.split("</think>")[-1]
+        else:
+            filtered_text = text
+            
+        # Also apply traditional <think> block removal for other models
         complete_think_pattern = r'<\s*think\s*>.*?</\s*think\s*>'
-        filtered_text = re.sub(complete_think_pattern, '', text, flags=re.DOTALL | re.IGNORECASE)
+        filtered_text = re.sub(complete_think_pattern, '', filtered_text, flags=re.DOTALL | re.IGNORECASE)
         
         # Check if there's an unclosed thinking block
         # Look for <think> that doesn't have a corresponding </think>
@@ -2118,7 +2125,7 @@ class TelegramRAGMainWindow(QMainWindow):
         self.load_settings()
         
     def setup_ui(self):
-        self.setWindowTitle("Telegram RAG System - Qt Interface")
+        self.setWindowTitle("OpenVINO Messenger AI‑Assistant")
         self.setMinimumSize(1400, 900)
         self.resize(1600, 1000)  # Set a comfortable default size
         

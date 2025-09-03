@@ -111,7 +111,7 @@ def download_ov_model_if_needed(model_name, precision="int4", model_type="llm"):
         else:
             ov_model_hub_id = f"OpenVINO/{model_path_name}-{precision}-ov"
     elif model_type == "rerank":
-        # Reranking models: OpenVINO/bge-reranker-base-int8-ov  
+        # Reranking models: Use OpenVINO preconverted models
         if model_name == "bge-reranker-v2-m3":
             ov_model_hub_id = "OpenVINO/bge-reranker-base-int8-ov"
         else:
