@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files, collect_all
+from PyInstaller.utils.hooks import collect_data_files, collect_all, collect_submodules, collect_dynamic_libs
 
 datas = [
     ('docs/images/OpenVINO_logo.png', 'docs/images'),
@@ -51,6 +51,27 @@ for p in pkgs:
     except Exception:
         pass
 
+
+# Ensure OpenVINO GenAI compiled extension and DLLs are bundled
+try:
+    hiddenimports += collect_submodules('openvino_genai')
+    binaries += collect_dynamic_libs('openvino_genai')
+except Exception:
+    pass
+
+# Ensure core OpenVINO runtime DLLs are bundled
+try:
+    hiddenimports += collect_submodules('openvino')
+    binaries += collect_dynamic_libs('openvino')
+except Exception:
+    pass
+
+# Tokenizers for OpenVINO may also ship native libs
+try:
+    hiddenimports += collect_submodules('openvino_tokenizers')
+    binaries += collect_dynamic_libs('openvino_tokenizers')
+except Exception:
+    pass
 
 a = Analysis(
     ['run_qt_app.py'],
