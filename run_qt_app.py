@@ -11,8 +11,15 @@ import os
 from pathlib import Path
 
 base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+# Add _internal and its src
 sys.path.insert(0, str(base_dir))
 sys.path.insert(0, str(base_dir / "src"))
+# Also add the dist root (parent of _internal) and its src/examples, because PyInstaller COLLECT
+# usually places these alongside the exe rather than inside _internal
+dist_root = base_dir.parent
+sys.path.insert(0, str(dist_root))
+sys.path.insert(0, str(dist_root / "src"))
+sys.path.insert(0, str(dist_root / "examples"))
 
 def main():
     """Launch the Qt application"""
