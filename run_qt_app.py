@@ -10,6 +10,10 @@ import sys
 import os
 from pathlib import Path
 
+base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(base_dir))
+sys.path.insert(0, str(base_dir / "src"))
+
 def main():
     """Launch the Qt application"""
     try:

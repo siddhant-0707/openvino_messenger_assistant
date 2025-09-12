@@ -7,7 +7,18 @@ from dotenv import load_dotenv
 import sys
 from pathlib import Path
 
-# Add src directory to path for imports
+# Ensure imports work both in source and PyInstaller-frozen builds
+try:
+    # When frozen, _MEIPASS points to the internal runtime dir (e.g. dist/TelegramRAG/_internal)
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+except Exception:
+    base_dir = Path(__file__).resolve().parents[1]
+
+# Add project root and src to sys.path
+sys.path.insert(0, str(base_dir))
+sys.path.insert(0, str(base_dir / "src"))
+
+# Back-compat: also add relative src for non-frozen runs
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 

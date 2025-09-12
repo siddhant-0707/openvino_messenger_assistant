@@ -1,7 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files, collect_all
 
-datas = [('docs/images/OpenVINO_logo.png', 'docs/images'), ('examples', 'examples')]
+datas = [
+    ('docs/images/OpenVINO_logo.png', 'docs/images'),
+    ('examples', 'examples'),
+    ('src', 'src'),  # include project sources so imports work in frozen app
+]
 binaries = []
 hiddenimports = [
     # Project-local modules that are sometimes imported dynamically
