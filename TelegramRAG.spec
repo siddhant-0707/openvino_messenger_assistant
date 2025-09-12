@@ -59,18 +59,33 @@ try:
 except Exception:
     pass
 
-# Explicitly add compiled extension and DLLs from openvino_genai (Windows .pyd/.dll)
-try:
-    import openvino_genai as _ovg
-    from pathlib import Path as _Path
-    _ovg_dir = _Path(_ovg.__file__).parent
-    # Hidden import for the compiled extension module commonly used by openvino_genai
-    hiddenimports += ['openvino_genai.py_openvino_genai']
-    for _pat in ('*.pyd', '*.dll'):
-        for _file in _ovg_dir.rglob(_pat):
-            binaries.append((str(_file), 'openvino_genai'))
-except Exception:
-    pass
+from importlib.util import find_spec as _find_spec
+from pathlib import Path as _Path
+
+# Hidden import names for compiled extensions
+hiddenimports += ['openvino.pyopenvino', 'openvino_genai.py_openvino_genai']
+
+def _bundle_pkg_libs(_pkg: str, extra_dirs=("libs",)):
+    try:
+        _spec = _find_spec(_pkg)
+        if not _spec or not _spec.origin:
+            return
+        _base = _Path(_spec.origin).parent
+        _dirs = [_base]
+        for _d in extra_dirs:
+            _dirs.append(_base / _d)
+        for _dir in _dirs:
+            if not _dir.exists():
+                continue
+            for _pat in ('*.pyd', '*.dll'):
+                for _f in _dir.rglob(_pat):
+                    binaries.append((str(_f), _pkg.replace('.', '/')))
+    except Exception:
+        pass
+
+_bundle_pkg_libs('openvino_genai')
+_bundle_pkg_libs('openvino')
+_bundle_pkg_libs('openvino_tokenizers')
 
 # Ensure core OpenVINO runtime DLLs are bundled
 try:
@@ -86,6 +101,8 @@ try:
 except Exception:
     pass
 
+runtime_hooks = ['hooks/pyi_rth_openvino_paths.py']
+
 a = Analysis(
     ['run_qt_app.py'],
     pathex=['/home/sidd/Documents/GitHub/openvino_messenger_assistant', '/home/sidd/Documents/GitHub/openvino_messenger_assistant/src'],
@@ -94,7 +111,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=runtime_hooks,
     excludes=[],
     noarchive=False,
     optimize=0,
