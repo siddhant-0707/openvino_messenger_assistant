@@ -59,6 +59,19 @@ try:
 except Exception:
     pass
 
+# Explicitly add compiled extension and DLLs from openvino_genai (Windows .pyd/.dll)
+try:
+    import openvino_genai as _ovg
+    from pathlib import Path as _Path
+    _ovg_dir = _Path(_ovg.__file__).parent
+    # Hidden import for the compiled extension module commonly used by openvino_genai
+    hiddenimports += ['openvino_genai.py_openvino_genai']
+    for _pat in ('*.pyd', '*.dll'):
+        for _file in _ovg_dir.rglob(_pat):
+            binaries.append((str(_file), 'openvino_genai'))
+except Exception:
+    pass
+
 # Ensure core OpenVINO runtime DLLs are bundled
 try:
     hiddenimports += collect_submodules('openvino')
